@@ -1,4 +1,4 @@
-import {chromium, type Response} from "playwright";
+import { chromium, type Response } from "playwright";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -19,13 +19,24 @@ const scopePath = start.pathname.endsWith("/")
   ? start.pathname
   : start.pathname + "/";
 
-/**
- * Normalize a URL for use as a crawl key.
- *
- * - removes hash
- * - removes query string
- * - removes trailing slash except for "/"
+/*
+ * --------------------------------------------------------------------------
+ * Types
+ * --------------------------------------------------------------------------
  */
+
+type Resource = {
+  body: Buffer;
+  contentType: string;
+  originalUrl: string;
+};
+
+/*
+ * --------------------------------------------------------------------------
+ * URL helpers
+ * --------------------------------------------------------------------------
+ */
+
 function normalizeUrl(raw: string): string {
   const url = new URL(raw);
 
@@ -39,9 +50,6 @@ function normalizeUrl(raw: string): string {
   return url.href;
 }
 
-/**
- * Is this URL part of the documentation we're crawling?
- */
 function inScope(raw: string): boolean {
   const url = new URL(raw);
 
@@ -54,17 +62,27 @@ function inScope(raw: string): boolean {
   );
 }
 
-/**
- * Convert a crawled page URL to its local HTML filename.
+/*
+ * --------------------------------------------------------------------------
+ * Output paths
+ * --------------------------------------------------------------------------
  *
- * Example:
+ * Pages:
  *
- * https://orm.drizzle.team/docs/overview
- *   -> output/orm.drizzle.team/docs/overview.html
+ *   https://example.com/docs/foo
+ *     ->
+ *   output/example.com/docs/foo.html
  *
- * https://orm.drizzle.team/docs/guides/
- *   -> output/orm.drizzle.team/docs/guides/index.html
+ * Assets:
+ *
+ *   https://example.com/_astro/foo.css
+ *     ->
+ *   output/example.com/_assets/_astro/foo.css
+ *
+ * We deliberately put assets in _assets so they cannot collide with
+ * generated HTML pages.
  */
+
 function pageOutputPath(raw: string): string {
   const url = new URL(raw);
 
@@ -85,20 +103,6 @@ function pageOutputPath(raw: string): string {
   return path.join(outputDir, url.hostname, pathname);
 }
 
-/**
- * Convert an asset URL to its local filename.
- *
- * Assets are kept under:
- *
- *   <hostname>/_assets/<original-path>
- *
- * Example:
- *
- * https://orm.drizzle.team/_astro/foo.css
- *   -> output/orm.drizzle.team/_assets/_astro/foo.css
- *
- * This avoids collisions between pages and assets.
- */
 function assetOutputPath(raw: string): string {
   const url = new URL(raw);
 
@@ -116,9 +120,47 @@ function assetOutputPath(raw: string): string {
   );
 }
 
-/**
- * Capture resources that can affect rendering.
+/*
+ * --------------------------------------------------------------------------
+ * External noise
+ * --------------------------------------------------------------------------
+ *
+ * These are normally analytics/search/tracking resources that don't belong
+ * in an offline documentation copy.
  */
+
+function isExternalNoise(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    const hostname = url.hostname;
+
+    return (
+      hostname.includes("google-analytics") ||
+      hostname.includes("googletagmanager") ||
+      hostname.includes("analytics") ||
+      hostname.includes("ahrefs") ||
+      hostname.includes("algolia") ||
+      hostname.includes("onedollarstats") ||
+      hostname.includes("doubleclick") ||
+      hostname.includes("segment.io") ||
+      hostname.includes("sentry.io")
+    );
+  } catch {
+    return true;
+  }
+}
+
+/*
+ * --------------------------------------------------------------------------
+ * Resource detection
+ * --------------------------------------------------------------------------
+ *
+ * We capture basically anything that can contribute to rendering.
+ *
+ * This intentionally isn't restricted to CSS/images/fonts. Modern docs
+ * sites frequently load SVGs, JSON configuration, JS chunks, media, etc.
+ */
+
 function shouldCapture(response: Response): boolean {
   const url = response.url();
 
@@ -130,9 +172,10 @@ function shouldCapture(response: Response): boolean {
 
   if (
     type === "stylesheet" ||
+    type === "script" ||
     type === "font" ||
     type === "image" ||
-    type === "script"
+    type === "media"
   ) {
     return true;
   }
@@ -142,11 +185,28 @@ function shouldCapture(response: Response): boolean {
 
   if (
     contentType.includes("text/css") ||
-    contentType.startsWith("font/") ||
-    contentType.includes("application/font") ||
     contentType.includes("javascript") ||
     contentType.includes("application/javascript") ||
-    contentType.startsWith("image/")
+    contentType.startsWith("font/") ||
+    contentType.includes("application/font") ||
+    contentType.startsWith("image/") ||
+    contentType.startsWith("audio/") ||
+    contentType.startsWith("video/")
+  ) {
+    return true;
+  }
+
+  /*
+   * Some sites serve assets with generic content types.
+   *
+   * These extensions are useful fallbacks.
+   */
+  const pathname = new URL(url).pathname.toLowerCase();
+
+  if (
+    /\.(css|js|mjs|cjs|woff|woff2|ttf|otf|eot|png|jpe?g|gif|webp|avif|svg|ico|mp4|webm|mp3|wav)$/i.test(
+      pathname
+    )
   ) {
     return true;
   }
@@ -154,27 +214,12 @@ function shouldCapture(response: Response): boolean {
   return false;
 }
 
-/**
- * Ignore obvious analytics/tracking resources.
+/*
+ * --------------------------------------------------------------------------
+ * Relative path helpers
+ * --------------------------------------------------------------------------
  */
-function isExternalNoise(raw: string): boolean {
-  const url = new URL(raw);
-  const hostname = url.hostname;
 
-  return (
-    hostname.includes("google-analytics") ||
-    hostname.includes("googletagmanager") ||
-    hostname.includes("analytics") ||
-    hostname.includes("ahrefs") ||
-    hostname.includes("algolia") ||
-    hostname.includes("onedollarstats") ||
-    hostname.includes("doubleclick")
-  );
-}
-
-/**
- * Return a path relative to the current page's output file.
- */
 function relativeAssetUrl(
   pageUrl: string,
   destination: string
@@ -189,105 +234,34 @@ function relativeAssetUrl(
   return relative.split(path.sep).join("/");
 }
 
-/**
- * Convert a URL from the original website to its local output path.
- *
- * This is the important bit for Dash.
- *
- * Examples:
- *
- * /docs/get-started
- *   -> ../docs/get-started.html
- *
- * /_astro/foo.css
- *   -> ../_assets/_astro/foo.css
- *
- * #installation
- *   -> unchanged
- *
- * https://github.com/foo/bar
- *   -> unchanged
- */
-function localUrl(
-  rawUrl: string,
-  pageUrl: string,
-  assetMap: Map<string, string>
-): string | undefined {
-  if (
-    rawUrl.startsWith("#") ||
-    rawUrl.startsWith("data:") ||
-    rawUrl.startsWith("mailto:") ||
-    rawUrl.startsWith("tel:") ||
-    rawUrl.startsWith("javascript:")
-  ) {
-    return undefined;
-  }
+function relativeDocumentUrl(
+  fromPageUrl: string,
+  destination: string
+): string {
+  const fromPath = pageOutputPath(fromPageUrl);
 
-  try {
-    const absoluteUrl = new URL(rawUrl, pageUrl);
+  const relative = path.relative(
+    path.dirname(fromPath),
+    destination
+  );
 
-    // Preserve external origins.
-    if (absoluteUrl.origin !== start.origin) {
-      return undefined;
-    }
-
-    const hash = absoluteUrl.hash;
-
-    absoluteUrl.hash = "";
-    absoluteUrl.search = "";
-
-    const normalized = normalizeUrl(absoluteUrl.href);
-
-    /*
-     * If this is a crawled documentation page, point at its
-     * local .html file.
-     */
-    if (inScope(normalized)) {
-      const destination = pageOutputPath(normalized);
-
-      const relative = relativeAssetUrl(
-        pageUrl,
-        destination
-      );
-
-      return relative + hash;
-    }
-
-    /*
-     * If it's a captured same-origin asset, point at the
-     * local asset.
-     */
-    const assetDestination = assetMap.get(normalized);
-
-    if (assetDestination) {
-      const relative = relativeAssetUrl(
-        pageUrl,
-        assetDestination
-      );
-
-      return relative + hash;
-    }
-
-    /*
-     * Same-origin URL that wasn't captured. Leave it alone.
-     */
-    return undefined;
-  } catch {
-    return undefined;
-  }
+  return relative.split(path.sep).join("/");
 }
 
-/**
- * Rewrite URLs inside CSS:
+/*
+ * --------------------------------------------------------------------------
+ * CSS rewriting
+ * --------------------------------------------------------------------------
  *
- *   url("/_astro/foo.webp")
+ * Rewrites things such as:
  *
- * becomes something like:
+ *   url("/_astro/foo.woff2")
+ *   url("../images/foo.png")
+ *   url("./foo.svg")
  *
- *   url("../_assets/_astro/foo.webp")
- *
- * while data URLs and external URLs remain untouched.
+ * into paths relative to the generated CSS file.
  */
+
 function rewriteCss(
   css: string,
   cssUrl: string,
@@ -296,19 +270,22 @@ function rewriteCss(
   return css.replace(
     /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi,
     (match, quote, rawUrl) => {
+      const value = rawUrl.trim();
+
       if (
-        rawUrl.startsWith("data:") ||
-        rawUrl.startsWith("#") ||
-        rawUrl.startsWith("http://") ||
-        rawUrl.startsWith("https://") ||
-        rawUrl.startsWith("//")
+        value.startsWith("data:") ||
+        value.startsWith("#") ||
+        value.startsWith("blob:") ||
+        value.startsWith("http://") ||
+        value.startsWith("https://") ||
+        value.startsWith("//")
       ) {
         return match;
       }
 
       try {
         const absolute = normalizeUrl(
-          new URL(rawUrl, cssUrl).href
+          new URL(value, cssUrl).href
         );
 
         const destination = assetMap.get(absolute);
@@ -330,68 +307,227 @@ function rewriteCss(
   );
 }
 
-/**
- * Rewrite HTML URLs.
+/*
+ * --------------------------------------------------------------------------
+ * HTML asset rewriting
+ * --------------------------------------------------------------------------
  *
- * This handles:
+ * Handles:
  *
- *   href
- *   src
- *   poster
- *   action
+ *   href="/preferred.css"
+ *   src="/_astro/foo.js"
+ *   src="/images/foo.png"
+ *   href="/favicon.ico"
+ *   src="../images/foo.png"
  *
- * Root-relative internal links are converted to local .html
- * paths. Same-origin assets are converted to local assets.
- * External links and anchors are preserved.
+ * It deliberately does NOT rewrite:
+ *
+ *   #heading
+ *   mailto:
+ *   javascript:
+ *   data:
+ *   external URLs
+ *
+ * Document links are handled separately.
  */
-function rewriteHtmlUrls(
+
+function rewriteHtmlAssets(
   html: string,
   pageUrl: string,
   assetMap: Map<string, string>
 ): string {
   return html.replace(
-    /\b(href|src|poster|action)=("([^"]*)"|'([^']*)')/gi,
-    (
-      match,
-      attribute,
-      quoted,
-      doubleUrl,
-      singleUrl
-    ) => {
+    /(src|href)=("([^"]+)"|'([^']+)')/gi,
+    (match, attribute, _quoted, doubleUrl, singleUrl) => {
       const rawUrl = doubleUrl ?? singleUrl;
 
-      const rewritten = localUrl(
-        rawUrl,
-        pageUrl,
-        assetMap
-      );
-
-      if (!rewritten) {
+      if (
+        rawUrl.startsWith("#") ||
+        rawUrl.startsWith("data:") ||
+        rawUrl.startsWith("mailto:") ||
+        rawUrl.startsWith("javascript:") ||
+        rawUrl.startsWith("tel:") ||
+        rawUrl.startsWith("blob:")
+      ) {
         return match;
       }
 
-      return `${attribute}="${rewritten}"`;
+      let absolute: string;
+
+      try {
+        absolute = normalizeUrl(
+          new URL(rawUrl, pageUrl).href
+        );
+      } catch {
+        return match;
+      }
+
+      /*
+       * Only rewrite if this URL is an asset we actually downloaded.
+       *
+       * This is the important part: because this happens in phase 2,
+       * assetMap now contains resources collected across the ENTIRE crawl.
+       */
+      const destination = assetMap.get(absolute);
+
+      if (!destination) {
+        return match;
+      }
+
+      const relative = relativeAssetUrl(
+        pageUrl,
+        destination
+      );
+
+      return `${attribute}="${relative}"`;
     }
   );
 }
 
-await fs.mkdir(outputDir, {recursive: true});
+/*
+ * --------------------------------------------------------------------------
+ * Internal document link rewriting
+ * --------------------------------------------------------------------------
+ *
+ * Example:
+ *
+ *   /docs/get-started
+ *
+ * becomes:
+ *
+ *   get-started.html
+ *
+ * while:
+ *
+ *   /docs/get-started#postgres
+ *
+ * becomes:
+ *
+ *   get-started.html#postgres
+ *
+ * External links remain untouched.
+ */
+
+function rewriteInternalLinks(
+  html: string,
+  pageUrl: string,
+  pageMap: Map<string, string>
+): string {
+  return html.replace(
+    /(href)=("([^"]+)"|'([^']+)')/gi,
+    (match, attribute, _quoted, doubleUrl, singleUrl) => {
+      const rawUrl = doubleUrl ?? singleUrl;
+
+      /*
+       * Preserve fragments.
+       */
+      if (rawUrl.startsWith("#")) {
+        return match;
+      }
+
+      /*
+       * Preserve non-document URLs.
+       */
+      if (
+        rawUrl.startsWith("mailto:") ||
+        rawUrl.startsWith("javascript:") ||
+        rawUrl.startsWith("tel:") ||
+        rawUrl.startsWith("data:")
+      ) {
+        return match;
+      }
+
+      let parsed: URL;
+
+      try {
+        parsed = new URL(rawUrl, pageUrl);
+      } catch {
+        return match;
+      }
+
+      /*
+       * Preserve external links.
+       */
+      if (parsed.origin !== start.origin) {
+        return match;
+      }
+
+      const normalized = normalizeUrl(parsed.href);
+
+      /*
+       * Only rewrite pages that were actually crawled.
+       */
+      const destination = pageMap.get(normalized);
+
+      if (!destination) {
+        return match;
+      }
+
+      const relative = relativeDocumentUrl(
+        pageUrl,
+        destination
+      );
+
+      /*
+       * Keep the original #anchor.
+       */
+      const fragment = parsed.hash;
+
+      return `${attribute}="${relative}${fragment}"`;
+    }
+  );
+}
+
+/*
+ * --------------------------------------------------------------------------
+ * Main
+ * --------------------------------------------------------------------------
+ */
+
+await fs.mkdir(outputDir, { recursive: true });
 
 const browser = await chromium.launch();
 
 const page = await browser.newPage();
 
 /*
- * Queue contains normalized URLs that still need crawling.
+ * Global maps.
+ *
+ * IMPORTANT:
+ *
+ * These survive the entire crawl. We do NOT recreate them for every page.
  */
-const queue: string[] = [normalizeUrl(start.href)];
+
+const resources = new Map<string, Resource>();
+
+const pages = new Map<string, string>();
+
+const queue: string[] = [
+  normalizeUrl(start.href),
+];
+
 const queued = new Set(queue);
+
 const visited = new Set<string>();
+
+/*
+ * ==========================================================================
+ * PHASE 1 — CRAWL
+ * ==========================================================================
+ *
+ * Download pages and resources.
+ *
+ * We do NOT rewrite anything yet.
+ */
+
+console.log();
+console.log("=== PHASE 1: CRAWL ===");
+console.log();
 
 while (
   queue.length > 0 &&
   visited.size < maxPages
-  ) {
+) {
   const requestedUrl = queue.shift()!;
 
   if (visited.has(requestedUrl)) {
@@ -400,13 +536,7 @@ while (
 
   console.log(`→ ${requestedUrl}`);
 
-  const resources = new Map<
-    string,
-    {
-      body: Buffer;
-      contentType: string;
-    }
-  >();
+  const pageResources = new Map<string, Resource>();
 
   const responseHandler = async (
     response: Response
@@ -420,15 +550,36 @@ while (
         return;
       }
 
-      const url = normalizeUrl(response.url());
+      const normalized = normalizeUrl(
+        response.url()
+      );
+
+      /*
+       * Don't download resources outside the site.
+       *
+       * This keeps the docset focused on the documentation site.
+       */
+      if (!inScope(normalized)) {
+        return;
+      }
 
       const body = await response.body();
 
-      resources.set(url, {
+      const resource: Resource = {
         body,
         contentType:
           response.headers()["content-type"] ?? "",
-      });
+        originalUrl: normalized,
+      };
+
+      /*
+       * Store globally.
+       *
+       * This is what makes phase 2 deterministic.
+       */
+      resources.set(normalized, resource);
+
+      pageResources.set(normalized, resource);
     } catch {
       /*
        * Some browser responses cannot be read.
@@ -449,10 +600,7 @@ while (
 
     if (!response) {
       console.log("  no response");
-      page.off(
-        "response",
-        responseHandler
-      );
+      page.off("response", responseHandler);
       continue;
     }
 
@@ -466,19 +614,12 @@ while (
       );
     }
 
-    /*
-     * Don't save redirects that leave our documentation scope.
-     */
     if (!inScope(finalUrl)) {
       console.log(
         "  outside scope, skipping"
       );
 
-      page.off(
-        "response",
-        responseHandler
-      );
-
+      page.off("response", responseHandler);
       continue;
     }
 
@@ -487,152 +628,78 @@ while (
         `  HTTP ${response.status()}, skipping`
       );
 
-      page.off(
-        "response",
-        responseHandler
-      );
-
+      page.off("response", responseHandler);
       continue;
     }
 
     /*
-     * Give lazy-loaded assets a chance to appear.
+     * Give lazy-loaded resources a chance to appear.
      */
     await page.waitForTimeout(1000);
 
-    visited.add(requestedUrl);
-    visited.add(finalUrl);
-
-    console.log(
-      `  captured ${resources.size} assets`
-    );
-
     /*
-     * Map every captured resource to its local path.
+     * Capture the rendered HTML exactly as the browser sees it.
      */
-    const assetMap = new Map<
-      string,
-      string
-    >();
+    const html = await page.content();
 
-    for (const [url, resource] of resources) {
-      const destination =
-        assetOutputPath(url);
-
-      await fs.mkdir(
-        path.dirname(destination),
-        {recursive: true}
-      );
-
-      await fs.writeFile(
-        destination,
-        resource.body
-      );
-
-      assetMap.set(
-        url,
-        destination
-      );
-    }
-
-    /*
-     * Get the final DOM after JavaScript has executed.
-     */
-    let html = await page.content();
-
-    /*
-     * Rewrite HTML links/assets.
-     */
-    html = rewriteHtmlUrls(
-      html,
-      finalUrl,
-      assetMap
-    );
-
-    /*
-     * Rewrite CSS references to fonts/images/etc.
-     */
-    for (const [
-      url,
-      resource
-    ] of resources) {
-      if (
-        !resource.contentType
-          .toLowerCase()
-          .includes("text/css")
-      ) {
-        continue;
-      }
-
-      const destination =
-        assetMap.get(url);
-
-      if (!destination) {
-        continue;
-      }
-
-      let css =
-        resource.body.toString(
-          "utf8"
-        );
-
-      css = rewriteCss(
-        css,
-        url,
-        assetMap
-      );
-
-      await fs.writeFile(
-        destination,
-        css
-      );
-    }
-
-    /*
-     * Save the page itself.
-     */
     const destination =
       pageOutputPath(finalUrl);
 
+    pages.set(finalUrl, destination);
+
     await fs.mkdir(
       path.dirname(destination),
-      {recursive: true}
+      { recursive: true }
     );
 
+    /*
+     * Save the unmodified HTML for now.
+     *
+     * It will be rewritten in phase 2.
+     */
     await fs.writeFile(
       destination,
       html
     );
 
+    visited.add(requestedUrl);
+    visited.add(finalUrl);
+
     console.log(
-      `  saved ${destination}`
+      `  captured ${pageResources.size} page resources`
     );
 
     /*
-     * Discover documentation links from the
-     * live DOM, before we've rewritten them.
+     * Discover links.
      */
     const links =
-      await page
-        .locator("a[href]")
-        .evaluateAll(
-          (anchors) =>
-            anchors
-              .map(
-                (a) =>
-                  (
-                    a as HTMLAnchorElement
-                  ).href
-              )
-              .filter(Boolean)
-        );
+      await page.locator("a[href]").evaluateAll(
+        (anchors) =>
+          anchors
+            .map(
+              (a) =>
+                (a as HTMLAnchorElement).href
+            )
+            .filter(Boolean)
+      );
 
     let discovered = 0;
 
     for (const href of links) {
       try {
+        const parsed = new URL(href);
+
+        /*
+         * Ignore external links.
+         */
+        if (
+          parsed.origin !== start.origin
+        ) {
+          continue;
+        }
+
         const normalized =
-          normalizeUrl(href);
+          normalizeUrl(parsed.href);
 
         if (
           inScope(normalized) &&
@@ -669,13 +736,164 @@ await browser.close();
 
 console.log();
 console.log(
-  `Crawled ${visited.size} URLs.`
+  `Crawl complete: ${visited.size} URLs`
+);
+console.log(
+  `Downloaded ${resources.size} unique assets`
 );
 
-if (visited.size >= maxPages) {
-  console.log(
-    `Stopped at MAX_PAGES=${maxPages} ` +
-    `(visited=${visited.size} ` +
-    `left_over_in_queue=${queue.length})`
+/*
+ * ==========================================================================
+ * PHASE 2 — WRITE ASSETS + REWRITE EVERYTHING
+ * ==========================================================================
+ */
+
+console.log();
+console.log("=== PHASE 2: REWRITE ===");
+console.log();
+
+/*
+ * Build the complete asset map.
+ *
+ * At this point we have resources from every page.
+ */
+
+const assetMap =
+  new Map<string, string>();
+
+for (const [
+  url,
+  resource,
+] of resources) {
+  const destination =
+    assetOutputPath(url);
+
+  assetMap.set(
+    url,
+    destination
+  );
+
+  await fs.mkdir(
+    path.dirname(destination),
+    { recursive: true }
+  );
+
+  await fs.writeFile(
+    destination,
+    resource.body
   );
 }
+
+console.log(
+  `Wrote ${assetMap.size} assets`
+);
+
+/*
+ * Rewrite CSS files.
+ *
+ * CSS can reference other assets, so this happens after the complete
+ * asset map has been constructed.
+ */
+
+let rewrittenCss = 0;
+
+for (const [
+  url,
+  resource,
+] of resources) {
+  if (
+    !resource.contentType.includes(
+      "text/css"
+    ) &&
+    !url.toLowerCase().endsWith(".css")
+  ) {
+    continue;
+  }
+
+  const destination =
+    assetMap.get(url);
+
+  if (!destination) {
+    continue;
+  }
+
+  let css =
+    resource.body.toString("utf8");
+
+  css = rewriteCss(
+    css,
+    url,
+    assetMap
+  );
+
+  await fs.writeFile(
+    destination,
+    css
+  );
+
+  rewrittenCss++;
+}
+
+console.log(
+  `Rewrote ${rewrittenCss} CSS files`
+);
+
+/*
+ * Rewrite HTML.
+ *
+ * Order matters:
+ *
+ *   1. assets
+ *   2. internal document links
+ *
+ * Anchors and external links are preserved.
+ */
+
+let rewrittenPages = 0;
+
+for (const [
+  pageUrl,
+  destination,
+] of pages) {
+  let html =
+    await fs.readFile(
+      destination,
+      "utf8"
+    );
+
+  html = rewriteHtmlAssets(
+    html,
+    pageUrl,
+    assetMap
+  );
+
+  html = rewriteInternalLinks(
+    html,
+    pageUrl,
+    pages
+  );
+
+  await fs.writeFile(
+    destination,
+    html
+  );
+
+  rewrittenPages++;
+
+  console.log(
+    `  rewritten ${destination}`
+  );
+}
+
+console.log();
+console.log(
+  `Rewrote ${rewrittenPages} HTML pages`
+);
+
+console.log();
+console.log("Done.");
+console.log();
+console.log(`Pages:   ${pages.size}`);
+console.log(`Assets:  ${assetMap.size}`);
+console.log(`Output:  ${path.resolve(outputDir)}`);
+console.log();
