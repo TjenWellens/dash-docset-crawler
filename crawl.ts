@@ -64,13 +64,58 @@ function pageOutputPath(raw: string): string {
   return path.join(outputDir, url.hostname, pathname);
 }
 
-function assetOutputPath(raw: string): string {
+function extensionFromContentType(
+  contentType: string
+): string {
+  const mime = contentType
+    .split(";")[0]
+    .trim()
+    .toLowerCase();
+
+  const extensions: Record<string, string> = {
+    "text/css": ".css",
+    "text/javascript": ".js",
+    "application/javascript": ".js",
+    "application/json": ".json",
+
+    "image/svg+xml": ".svg",
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/x-icon": ".ico",
+
+    "font/woff": ".woff",
+    "font/woff2": ".woff2",
+    "application/font-woff": ".woff",
+    "application/font-woff2": ".woff2",
+
+    "application/pdf": ".pdf",
+  };
+
+  return extensions[mime] ?? "";
+}
+
+function assetOutputPath(
+  raw: string,
+  contentType = ""
+): string {
   const url = new URL(raw);
 
   let pathname = url.pathname.replace(/^\/+/, "");
 
   if (!pathname) {
     pathname = "index";
+  }
+
+  // If the URL doesn't already have a filename extension,
+  // derive one from the HTTP Content-Type.
+  const filename = pathname.split("/").pop() ?? "";
+
+  if (
+    !/\.[a-z0-9]{1,10}$/i.test(filename)
+  ) {
+    pathname += extensionFromContentType(contentType);
   }
 
   return path.join(
@@ -278,7 +323,10 @@ while (queue.length > 0 && visited.size < maxPages) {
 
     // Save assets first so CSS can reference them.
     for (const [url, resource] of resources) {
-      const destination = assetOutputPath(url);
+      const destination = assetOutputPath(
+        url,
+        resource.contentType
+      );
 
       await fs.mkdir(path.dirname(destination), {
         recursive: true,
