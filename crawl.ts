@@ -1,18 +1,25 @@
-import {
-  chromium,
-  type BrowserContext,
-  type Page,
-  type Response,
-} from "playwright";
+import {type BrowserContext, chromium, type Page, type Response,} from "playwright";
 import fs from "node:fs/promises";
 import path from "node:path";
 
 const startUrl = process.argv[2];
-const outputDir = process.argv[3] ?? "./output";
-const maxPages = Number(process.env.MAX_PAGES ?? 500);
+const rawDir = process.argv[3];
 
-if (!startUrl) {
-  console.error("Usage: npx tsx crawl.ts <url> [output-dir]");
+const maxPages = Number(
+  process.env.MAX_PAGES ?? 500,
+);
+
+if (!startUrl || !rawDir) {
+  console.error(
+    "Usage: npx tsx crawl.ts <url> <raw-dir>",
+  );
+  console.error();
+  console.error(
+    "Example:",
+  );
+  console.error(
+    "  npx tsx crawl.ts https://orm.drizzle.team/docs/ docs/drizzle/raw",
+  );
   process.exit(1);
 }
 
@@ -24,105 +31,288 @@ const scopePath = start.pathname.endsWith("/")
   ? start.pathname
   : start.pathname + "/";
 
-const stateFile = path.join(
-  outputDir,
-  ".crawl-state.json",
-);
+/*
+ * ============================================================
+ * TYPES
+ * ============================================================
+ */
+
+type PageStatus =
+  | "queued"
+  | "downloaded"
+  | "failed";
+
+type ResourceStatus =
+  | "discovered"
+  | "downloaded"
+  | "failed";
+
+interface PageRecord {
+  path: string;
+  status: PageStatus;
+  scrapedAt?: string;
+  error?: string;
+}
+
+interface ResourceRecord {
+  path: string;
+  status: ResourceStatus;
+  contentType?: string;
+  scrapedAt?: string;
+  error?: string;
+}
+
+interface Manifest {
+  version: 1;
+
+  site: {
+    name: string;
+    startUrl: string;
+  };
+
+  scope: {
+    origin: string;
+    path: string;
+  };
+
+  scrape: {
+    startedAt: string;
+    lastUpdatedAt: string;
+    completedAt: string | null;
+    complete: boolean;
+  };
+
+  pages: Record<string, PageRecord>;
+
+  resources: Record<
+    string,
+    ResourceRecord
+  >;
+
+  queue: string[];
+}
+
+/*
+ * ============================================================
+ * TIME / MANIFEST HELPERS
+ * ============================================================
+ */
+
+function now(): string {
+  return new Date().toISOString();
+}
+
+function siteNameFromDir(): string {
+  return path.basename(
+    path.dirname(
+      path.resolve(rawDir),
+    ),
+  );
+}
+
+const manifestPath =
+  path.join(
+    rawDir,
+    "manifest.json",
+  );
+
+async function saveManifest(
+  manifest: Manifest,
+): Promise<void> {
+  manifest.scrape.lastUpdatedAt =
+    now();
+
+  const temporaryPath =
+    manifestPath + ".tmp";
+
+  await fs.writeFile(
+    temporaryPath,
+    JSON.stringify(
+      manifest,
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+
+  /*
+   * Atomic-ish replacement:
+   *
+   * write .tmp first, then rename it over
+   * the real manifest.
+   */
+  await fs.rename(
+    temporaryPath,
+    manifestPath,
+  );
+}
+
+async function loadManifest(): Promise<
+  Manifest | null
+> {
+  try {
+    const contents =
+      await fs.readFile(
+        manifestPath,
+        "utf8",
+      );
+
+    return JSON.parse(
+      contents,
+    ) as Manifest;
+  } catch {
+    return null;
+  }
+}
+
+/*
+ * ============================================================
+ * URL HELPERS
+ * ============================================================
+ */
 
 /**
  * Normalize a URL:
+ *
  * - remove hash
  * - remove query string
- * - remove trailing slash except for "/"
+ * - remove trailing slash except "/"
  */
-function normalizeUrl(raw: string): string {
+function normalizeUrl(
+  raw: string,
+): string {
   const url = new URL(raw);
 
   url.hash = "";
   url.search = "";
 
-  if (url.pathname !== "/" && url.pathname.endsWith("/")) {
-    url.pathname = url.pathname.slice(0, -1);
+  if (
+    url.pathname !== "/" &&
+    url.pathname.endsWith("/")
+  ) {
+    url.pathname =
+      url.pathname.slice(
+        0,
+        -1,
+      );
   }
 
   return url.href;
 }
 
 /**
- * Whether a URL belongs to the documentation scope.
+ * Whether a URL belongs to the
+ * documentation scope.
  */
-function inScope(raw: string): boolean {
+function inScope(
+  raw: string,
+): boolean {
   const url = new URL(raw);
 
   return (
     url.origin === start.origin &&
     (
       url.pathname === start.pathname ||
-      url.pathname.startsWith(scopePath)
+      url.pathname.startsWith(
+        scopePath,
+      )
     )
   );
 }
 
 /**
- * Convert a page URL to a local HTML path.
- *
- * https://orm.drizzle.team/docs/overview
- *
- * -> ./test-drizzle/orm.drizzle.team/docs/overview.html
+ * Convert a page URL to a path
+ * inside raw/pages/.
  */
-function pageOutputPath(raw: string): string {
+function pageOutputPath(
+  raw: string,
+): string {
   const url = new URL(raw);
 
-  let pathname = url.pathname;
+  let pathname =
+    url.pathname;
 
-  if (pathname === "/" || pathname === "") {
-    pathname = "index.html";
+  if (
+    pathname === "/" ||
+    pathname === ""
+  ) {
+    pathname =
+      "index.html";
   } else {
-    pathname = pathname.replace(/^\/+/, "");
+    pathname =
+      pathname.replace(
+        /^\/+/,
+        "",
+      );
 
-    if (pathname.endsWith("/")) {
-      pathname += "index.html";
+    if (
+      pathname.endsWith("/")
+    ) {
+      pathname +=
+        "index.html";
     } else {
-      pathname += ".html";
+      pathname +=
+        ".html";
     }
   }
 
   return path.join(
-    outputDir,
+    "pages",
     url.hostname,
     pathname,
   );
 }
 
 /**
- * Convert an arbitrary resource URL to its local asset path.
- *
- * https://orm.drizzle.team/_astro/foo.css
- *
- * -> ./test-drizzle/orm.drizzle.team/_assets/_astro/foo.css
+ * Convert a resource URL to a
+ * path inside raw/resources/.
  */
-function assetOutputPath(raw: string): string {
+function resourceOutputPath(
+  raw: string,
+): string {
   const url = new URL(raw);
 
-  let pathname = url.pathname.replace(/^\/+/, "");
+  let pathname =
+    url.pathname.replace(
+      /^\/+/,
+      "",
+    );
 
   if (!pathname) {
     pathname = "index";
   }
 
   return path.join(
-    outputDir,
+    "resources",
     url.hostname,
-    "_assets",
     pathname,
   );
 }
 
 /**
- * Resources we care about.
+ * Turn a manifest-relative path into
+ * an absolute filesystem path.
  */
-function shouldCapture(response: Response): boolean {
-  const url = response.url();
+function absoluteRawPath(
+  relativePath: string,
+): string {
+  return path.join(
+    rawDir,
+    relativePath,
+  );
+}
+
+/*
+ * ============================================================
+ * RESOURCE HELPERS
+ * ============================================================
+ */
+
+function shouldCapture(
+  response: Response,
+): boolean {
+  const url =
+    response.url();
 
   if (
     !url.startsWith("http://") &&
@@ -131,7 +321,10 @@ function shouldCapture(response: Response): boolean {
     return false;
   }
 
-  const type = response.request().resourceType();
+  const type =
+    response
+      .request()
+      .resourceType();
 
   if (
     type === "stylesheet" ||
@@ -143,14 +336,26 @@ function shouldCapture(response: Response): boolean {
   }
 
   const contentType =
-    response.headers()["content-type"] ?? "";
+    response
+      .headers()
+      ["content-type"] ?? "";
 
   if (
-    contentType.includes("text/css") ||
-    contentType.startsWith("font/") ||
-    contentType.includes("application/font") ||
-    contentType.includes("javascript") ||
-    contentType.includes("image/")
+    contentType.includes(
+      "text/css",
+    ) ||
+    contentType.startsWith(
+      "font/",
+    ) ||
+    contentType.includes(
+      "application/font",
+    ) ||
+    contentType.includes(
+      "javascript",
+    ) ||
+    contentType.includes(
+      "image/",
+    )
   ) {
     return true;
   }
@@ -158,84 +363,37 @@ function shouldCapture(response: Response): boolean {
   return false;
 }
 
-/**
- * Ignore analytics/search/telemetry resources.
- */
-function isExternalNoise(raw: string): boolean {
-  const url = new URL(raw);
-  const hostname = url.hostname;
+function isExternalNoise(
+  raw: string,
+): boolean {
+  const url =
+    new URL(raw);
+
+  const hostname =
+    url.hostname;
 
   return (
-    hostname.includes("google-analytics") ||
-    hostname.includes("googletagmanager") ||
-    hostname.includes("analytics") ||
-    hostname.includes("ahrefs") ||
-    hostname.includes("algolia") ||
-    hostname.includes("onedollarstats") ||
-    hostname.includes("doubleclick")
-  );
-}
-
-/**
- * Calculate a relative path from one local file to another.
- */
-function relativeAssetUrl(
-  pageUrl: string,
-  destination: string,
-): string {
-  const pagePath = pageOutputPath(pageUrl);
-
-  const relative = path.relative(
-    path.dirname(pagePath),
-    destination,
-  );
-
-  return relative
-    .split(path.sep)
-    .join("/");
-}
-
-/**
- * Rewrite url(...) references inside CSS.
- */
-function rewriteCss(
-  css: string,
-  cssUrl: string,
-  resourceMap: Map<string, string>,
-): string {
-  return css.replace(
-    /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi,
-    (match, _quote, rawUrl) => {
-      if (
-        rawUrl.startsWith("data:") ||
-        rawUrl.startsWith("#")
-      ) {
-        return match;
-      }
-
-      try {
-        const absolute = normalizeUrl(
-          new URL(rawUrl, cssUrl).href,
-        );
-
-        const destination =
-          resourceMap.get(absolute);
-
-        if (!destination) {
-          return match;
-        }
-
-        const relative =
-          relativeAssetUrl(
-            cssUrl,
-            destination,
-          );
-
-        return `url("${relative}")`;
-      } catch {
-        return match;
-      }
-    },
+    hostname.includes(
+      "google-analytics",
+    ) ||
+    hostname.includes(
+      "googletagmanager",
+    ) ||
+    hostname.includes(
+      "analytics",
+    ) ||
+    hostname.includes(
+      "ahrefs",
+    ) ||
+    hostname.includes(
+      "algolia",
+    ) ||
+    hostname.includes(
+      "onedollarstats",
+    ) ||
+    hostname.includes(
+      "doubleclick",
+    )
   );
 }
 
@@ -252,14 +410,17 @@ function addResourceUrl(
   }
 
   try {
-    const absolute = new URL(
-      value,
-      baseUrl,
-    );
+    const absolute =
+      new URL(
+        value,
+        baseUrl,
+      );
 
     if (
-      absolute.protocol !== "http:" &&
-      absolute.protocol !== "https:"
+      absolute.protocol !==
+        "http:" &&
+      absolute.protocol !==
+        "https:"
     ) {
       return;
     }
@@ -267,33 +428,34 @@ function addResourceUrl(
     absolute.hash = "";
     absolute.search = "";
 
-    urls.add(absolute.href);
+    urls.add(
+      absolute.href,
+    );
   } catch {
     // Ignore malformed URLs.
   }
 }
 
 /**
- * Collect actual resources referenced by the current page.
- *
- * IMPORTANT:
- *
- * We deliberately do NOT collect every <link href>.
- *
- * Ordinary <link> elements can contain navigation/canonical/etc.
- * URLs and must not be mistaken for downloadable assets.
+ * Collect resources referenced by
+ * the current page.
  */
 async function collectResourceUrls(
   page: Page,
 ): Promise<string[]> {
-  const urls = new Set<string>();
-  const baseUrl = page.url();
+  const urls =
+    new Set<string>();
+
+  const baseUrl =
+    page.url();
 
   /*
-   * Stylesheets.
+   * Stylesheets
    */
   const stylesheets =
-    page.locator('link[rel~="stylesheet"][href]');
+    page.locator(
+      'link[rel~="stylesheet"][href]',
+    );
 
   const stylesheetCount =
     await stylesheets.count();
@@ -307,13 +469,15 @@ async function collectResourceUrls(
       urls,
       await stylesheets
         .nth(i)
-        .getAttribute("href"),
+        .getAttribute(
+          "href",
+        ),
       baseUrl,
     );
   }
 
   /*
-   * Icons / favicons.
+   * Icons
    */
   const icons =
     page.locator(
@@ -332,15 +496,15 @@ async function collectResourceUrls(
       urls,
       await icons
         .nth(i)
-        .getAttribute("href"),
+        .getAttribute(
+          "href",
+        ),
       baseUrl,
     );
   }
 
   /*
-   * Preload / modulepreload.
-   *
-   * Only treat these as resources when they have an href.
+   * preload / modulepreload
    */
   const preloads =
     page.locator(
@@ -359,16 +523,20 @@ async function collectResourceUrls(
       urls,
       await preloads
         .nth(i)
-        .getAttribute("href"),
+        .getAttribute(
+          "href",
+        ),
       baseUrl,
     );
   }
 
   /*
-   * <img src>
+   * Images
    */
   const images =
-    page.locator("img[src]");
+    page.locator(
+      "img",
+    );
 
   const imageCount =
     await images.count();
@@ -378,23 +546,27 @@ async function collectResourceUrls(
     i < imageCount;
     i++
   ) {
+    const image =
+      images.nth(i);
+
     addResourceUrl(
       urls,
-      await images
-        .nth(i)
-        .getAttribute("src"),
+      await image.getAttribute(
+        "src",
+      ),
       baseUrl,
     );
 
     const srcset =
-      await images
-        .nth(i)
-        .getAttribute("srcset");
+      await image.getAttribute(
+        "srcset",
+      );
 
     if (srcset) {
       for (
-        const candidate of srcset.split(",")
-        ) {
+        const candidate of
+          srcset.split(",")
+      ) {
         const url =
           candidate
             .trim()
@@ -410,10 +582,12 @@ async function collectResourceUrls(
   }
 
   /*
-   * <source src> / srcset
+   * <source>
    */
   const sources =
-    page.locator("source");
+    page.locator(
+      "source",
+    );
 
   const sourceCount =
     await sources.count();
@@ -428,17 +602,22 @@ async function collectResourceUrls(
 
     addResourceUrl(
       urls,
-      await source.getAttribute("src"),
+      await source.getAttribute(
+        "src",
+      ),
       baseUrl,
     );
 
     const srcset =
-      await source.getAttribute("srcset");
+      await source.getAttribute(
+        "srcset",
+      );
 
     if (srcset) {
       for (
-        const candidate of srcset.split(",")
-        ) {
+        const candidate of
+          srcset.split(",")
+      ) {
         const url =
           candidate
             .trim()
@@ -454,10 +633,12 @@ async function collectResourceUrls(
   }
 
   /*
-   * <script src>
+   * Scripts
    */
   const scripts =
-    page.locator("script[src]");
+    page.locator(
+      "script[src]",
+    );
 
   const scriptCount =
     await scripts.count();
@@ -471,13 +652,15 @@ async function collectResourceUrls(
       urls,
       await scripts
         .nth(i)
-        .getAttribute("src"),
+        .getAttribute(
+          "src",
+        ),
       baseUrl,
     );
   }
 
   /*
-   * <video src>, <audio src>
+   * Video/audio
    */
   const media =
     page.locator(
@@ -496,16 +679,20 @@ async function collectResourceUrls(
       urls,
       await media
         .nth(i)
-        .getAttribute("src"),
+        .getAttribute(
+          "src",
+        ),
       baseUrl,
     );
   }
 
   /*
-   * <video poster>
+   * Video posters
    */
   const posters =
-    page.locator("video[poster]");
+    page.locator(
+      "video[poster]",
+    );
 
   const posterCount =
     await posters.count();
@@ -519,171 +706,24 @@ async function collectResourceUrls(
       urls,
       await posters
         .nth(i)
-        .getAttribute("poster"),
+        .getAttribute(
+          "poster",
+        ),
       baseUrl,
     );
   }
 
-  return [...urls];
+  return [
+    ...urls,
+  ];
 }
 
-/**
- * Rewrite HTML src/href attributes.
- *
- * Rules:
- *
- * 1. #anchor                 -> preserve
- * 2. mailto/javascript/data  -> preserve
- * 3. external URL            -> preserve
- * 4. internal page           -> local .html
- * 5. downloaded resource     -> local asset
+/*
+ * ============================================================
+ * DOWNLOAD
+ * ============================================================
  */
-function rewriteHtml(
-  html: string,
-  pageUrl: string,
-  resourceMap: Map<string, string>,
-): string {
-  return html.replace(
-    /(src|href|poster)=("([^"]+)"|'([^']+)')/gi,
-    (
-      match,
-      attribute,
-      _quoted,
-      doubleUrl,
-      singleUrl,
-    ) => {
-      const rawUrl =
-        doubleUrl ?? singleUrl;
 
-      /*
-       * Fragment-only anchors.
-       */
-      if (
-        rawUrl.startsWith("#")
-      ) {
-        return match;
-      }
-
-      /*
-       * Non-HTTP URLs.
-       */
-      if (
-        rawUrl.startsWith("data:") ||
-        rawUrl.startsWith("mailto:") ||
-        rawUrl.startsWith("javascript:") ||
-        rawUrl.startsWith("tel:")
-      ) {
-        return match;
-      }
-
-      let absolute: URL;
-
-      try {
-        absolute =
-          new URL(
-            rawUrl,
-            pageUrl,
-          );
-      } catch {
-        return match;
-      }
-
-      /*
-       * External links stay external.
-       */
-      if (
-        absolute.origin !== start.origin
-      ) {
-        return match;
-      }
-
-      /*
-       * Save the fragment before normalization.
-       */
-      const hash =
-        absolute.hash;
-
-      absolute.hash = "";
-
-      /*
-       * Ignore query parameters in the
-       * local copy, just like normalizeUrl().
-       */
-      const normalized =
-        normalizeUrl(
-          absolute.href,
-        );
-
-      /*
-       * IMPORTANT:
-       *
-       * Internal documentation pages are
-       * checked FIRST.
-       *
-       * This prevents /docs/sustainability
-       * from ever being interpreted as an
-       * asset.
-       */
-      if (
-        inScope(normalized)
-      ) {
-        const destination =
-          pageOutputPath(
-            normalized,
-          );
-
-        let relative =
-          path.relative(
-            path.dirname(
-              pageOutputPath(pageUrl),
-            ),
-            destination,
-          );
-
-        relative =
-          relative
-            .split(path.sep)
-            .join("/");
-
-        if (hash) {
-          relative += hash;
-        }
-
-        return `${attribute}="${relative}"`;
-      }
-
-      /*
-       * Resource.
-       */
-      const resourceDestination =
-        resourceMap.get(
-          normalized,
-        );
-
-      if (
-        resourceDestination
-      ) {
-        const relative =
-          relativeAssetUrl(
-            pageUrl,
-            resourceDestination,
-          );
-
-        return `${attribute}="${relative}"`;
-      }
-
-      /*
-       * Unknown internal URL:
-       * leave untouched rather than guessing.
-       */
-      return match;
-    },
-  );
-}
-
-/**
- * Download a resource using Playwright's request context.
- */
 async function downloadResource(
   context: BrowserContext,
   resourceUrl: string,
@@ -709,9 +749,12 @@ async function downloadResource(
     }
 
     return {
-      body: await response.body(),
+      body:
+        await response.body(),
+
       contentType:
-        response.headers()["content-type"] ?? "",
+        response.headers()
+          ["content-type"] ?? "",
     };
   } catch {
     console.log(
@@ -722,98 +765,158 @@ async function downloadResource(
   }
 }
 
-/**
+/*
  * ============================================================
- * RESUME STATE
+ * INITIALIZE / RESUME MANIFEST
  * ============================================================
  */
 
-type CrawlState = {
-  queue: string[];
-  queued: string[];
-  visited: string[];
-  pages: Record<string, string>;
-  resources: Record<
-    string,
-    {
-      contentType: string;
-    }
-  >;
-};
-
-async function saveCrawlState(
-  queue: string[],
-  queued: Set<string>,
-  visited: Set<string>,
-  pages: Map<string, string>,
-  resources: Map<
-    string,
-    {
-      contentType: string;
-    }
-  >,
-): Promise<void> {
-  const state: CrawlState = {
-    queue,
-    queued: [...queued],
-    visited: [...visited],
-    pages: Object.fromEntries(
-      pages,
-    ),
-    resources: Object.fromEntries(
-      resources,
-    ),
-  };
-
-  const tmpFile =
-    `${stateFile}.tmp`;
-
-  await fs.writeFile(
-    tmpFile,
-    JSON.stringify(
-      state,
-      null,
-      2,
-    ),
-    "utf8",
-  );
-
-  /*
-   * Atomic-ish replacement:
-   *
-   * We write to .tmp first and only then
-   * replace the real state file.
-   */
-  await fs.rename(
-    tmpFile,
-    stateFile,
-  );
-}
-
-async function loadCrawlState(): Promise<
-  CrawlState | null
-> {
-  try {
-    const json =
-      await fs.readFile(
-        stateFile,
-        "utf8",
-      );
-
-    return JSON.parse(
-      json,
-    ) as CrawlState;
-  } catch {
-    return null;
-  }
-}
-
 await fs.mkdir(
-  outputDir,
+  rawDir,
   {
     recursive: true,
   },
 );
+
+let manifest =
+  await loadManifest();
+
+if (manifest) {
+  console.log(
+    "=== RESUMING EXISTING CRAWL ===",
+  );
+
+  console.log(
+    `Started: ${manifest.scrape.startedAt}`,
+  );
+
+  console.log(
+    `Last updated: ${manifest.scrape.lastUpdatedAt}`,
+  );
+
+  console.log(
+    `Pages: ${Object.keys(manifest.pages).length}`,
+  );
+
+  console.log(
+    `Resources: ${Object.keys(manifest.resources).length}`,
+  );
+
+  console.log(
+    `Queue: ${manifest.queue.length}`,
+  );
+
+  if (manifest.scrape.complete) {
+    console.log();
+    console.log(
+      "Crawl is already complete.",
+    );
+    console.log(
+      "Delete the raw directory to start a fresh crawl.",
+    );
+
+    process.exit(0);
+  }
+
+  /*
+   * Make sure the manifest's start URL
+   * matches the command.
+   */
+  const normalizedStart =
+    normalizeUrl(
+      start.href,
+    );
+
+  if (
+    normalizeUrl(
+      manifest.site.startUrl,
+    ) !== normalizedStart
+  ) {
+    console.error();
+    console.error(
+      "ERROR: Existing manifest belongs to a different start URL.",
+    );
+    console.error(
+      `Manifest: ${manifest.site.startUrl}`,
+    );
+    console.error(
+      `Command:  ${start.href}`,
+    );
+    console.error();
+    console.error(
+      "Use a different raw directory or remove the existing manifest.",
+    );
+
+    process.exit(1);
+  }
+} else {
+  const timestamp =
+    now();
+
+  manifest = {
+    version: 1,
+
+    site: {
+      name:
+        siteNameFromDir(),
+
+      startUrl:
+        normalizeUrl(
+          start.href,
+        ),
+    },
+
+    scope: {
+      origin:
+        start.origin,
+
+      path:
+        start.pathname,
+    },
+
+    scrape: {
+      startedAt:
+        timestamp,
+
+      lastUpdatedAt:
+        timestamp,
+
+      completedAt:
+        null,
+
+      complete:
+        false,
+    },
+
+    pages: {},
+
+    resources: {},
+
+    queue: [
+      normalizeUrl(
+        start.href,
+      ),
+    ],
+  };
+
+  await saveManifest(
+    manifest,
+  );
+
+  console.log(
+    "=== STARTING NEW CRAWL ===",
+  );
+
+  console.log(
+    `Started: ${timestamp}`,
+  );
+}
+
+/*
+ * ============================================================
+ * BROWSER
+ * ============================================================
+ */
 
 const browser =
   await chromium.launch();
@@ -830,114 +933,32 @@ const page =
  * ============================================================
  */
 
+console.log();
 console.log(
   "=== PHASE 1: CRAWL ===",
 );
 
-/*
- * page URL -> HTML
- */
-let pages:
-  Map<string, string>;
-
-/*
- * resource URL -> metadata
- */
-let resources:
-  Map<
-    string,
-    {
-      contentType: string;
-    }
-  >;
-
-let queue: string[];
-let queued: Set<string>;
-let visited: Set<string>;
-
-const existingState =
-  await loadCrawlState();
-
-if (existingState) {
-  console.log();
-  console.log(
-    `↻ Resuming crawl from ${stateFile}`,
-  );
-
-  queue =
-    existingState.queue;
-
-  queued =
-    new Set(
-      existingState.queued,
-    );
-
-  visited =
-    new Set(
-      existingState.visited,
-    );
-
-  pages =
-    new Map(
-      Object.entries(
-        existingState.pages,
-      ),
-    );
-
-  resources =
-    new Map(
-      Object.entries(
-        existingState.resources,
-      ),
-    );
-
-  console.log(
-    `  Pages already crawled: ${visited.size}`,
-  );
-
-  console.log(
-    `  Pages waiting in queue: ${queue.length}`,
-  );
-
-  console.log(
-    `  Resources discovered: ${resources.size}`,
-  );
-} else {
-  console.log();
-  console.log(
-    "Starting new crawl",
-  );
-
-  queue = [
-    normalizeUrl(
-      start.href,
-    ),
-  ];
-
-  queued =
-    new Set(queue);
-
-  visited =
-    new Set();
-
-  pages =
-    new Map();
-
-  resources =
-    new Map();
-}
+let pagesThisRun = 0;
 
 while (
-  queue.length > 0 &&
-  visited.size < maxPages
-  ) {
+  manifest.queue.length > 0 &&
+  pagesThisRun < maxPages
+) {
   const requestedUrl =
-    queue.shift()!;
+    manifest.queue.shift()!;
+
+  /*
+   * Don't crawl a page that was
+   * already successfully downloaded.
+   */
+  const existing =
+    manifest.pages[
+      requestedUrl
+    ];
 
   if (
-    visited.has(
-      requestedUrl,
-    )
+    existing?.status ===
+    "downloaded"
   ) {
     continue;
   }
@@ -951,17 +972,18 @@ while (
       await page.goto(
         requestedUrl,
         {
-          waitUntil: "networkidle",
-          timeout: 60_000,
+          waitUntil:
+            "networkidle",
+
+          timeout:
+            60_000,
         },
       );
 
     if (!response) {
-      console.log(
-        "  no response",
+      throw new Error(
+        "No response",
       );
-
-      continue;
     }
 
     const finalUrl =
@@ -970,7 +992,8 @@ while (
       );
 
     if (
-      finalUrl !== requestedUrl
+      finalUrl !==
+      requestedUrl
     ) {
       console.log(
         `  redirect → ${finalUrl}`,
@@ -988,43 +1011,92 @@ while (
     }
 
     if (!response.ok()) {
-      console.log(
-        `  HTTP ${response.status()}, skipping`,
+      throw new Error(
+        `HTTP ${response.status()}`,
       );
-
-      continue;
     }
 
     /*
-     * Give lazy-loaded assets a chance.
+     * Allow lazy-loaded resources
+     * to appear.
      */
     await page.waitForTimeout(
       1000,
     );
 
     /*
-     * Capture HTML.
+     * Save raw HTML.
      */
     const html =
       await page.content();
 
-    pages.set(
-      finalUrl,
+    const pageRelativePath =
+      pageOutputPath(
+        finalUrl,
+      );
+
+    const pagePath =
+      absoluteRawPath(
+        pageRelativePath,
+      );
+
+    await fs.mkdir(
+      path.dirname(pagePath),
+      {
+        recursive: true,
+      },
+    );
+
+    await fs.writeFile(
+      pagePath,
       html,
+      "utf8",
     );
 
-    visited.add(
-      requestedUrl,
-    );
+    const scrapedAt =
+      now();
 
-    visited.add(
-      finalUrl,
-    );
+    /*
+     * Record final URL.
+     */
+    manifest.pages[
+      finalUrl
+    ] = {
+      path:
+        pageRelativePath,
+
+      status:
+        "downloaded",
+
+      scrapedAt,
+    };
+
+    /*
+     * If this was a redirect, make
+     * the requested URL point at the
+     * final page too.
+     */
+    if (
+      requestedUrl !==
+      finalUrl
+    ) {
+      manifest.pages[
+        requestedUrl
+      ] = {
+        path:
+          pageRelativePath,
+
+        status:
+          "downloaded",
+
+        scrapedAt,
+      };
+    }
 
     /*
      * Discover resources.
      */
-    const pageResourceUrls =
+    const resourceUrls =
       await collectResourceUrls(
         page,
       );
@@ -1032,8 +1104,9 @@ while (
     let newResources = 0;
 
     for (
-      const resourceUrl of pageResourceUrls
-      ) {
+      const resourceUrl of
+        resourceUrls
+    ) {
       if (
         isExternalNoise(
           resourceUrl,
@@ -1042,30 +1115,38 @@ while (
         continue;
       }
 
-      if (
-        !resources.has(
+      const normalized =
+        normalizeUrl(
           resourceUrl,
-        )
-      ) {
-        resources.set(
-          resourceUrl,
-          {
-            contentType: "",
-          },
         );
+
+      if (
+        !manifest.resources[
+          normalized
+        ]
+      ) {
+        manifest.resources[
+          normalized
+        ] = {
+          path:
+            resourceOutputPath(
+              normalized,
+            ),
+
+          status:
+            "discovered",
+        };
 
         newResources++;
       }
     }
 
     console.log(
-      `  captured ${pageResourceUrls.length} page resources (${newResources} new)`,
+      `  captured ${resourceUrls.length} page resources (${newResources} new)`,
     );
 
     /*
-     * Discover internal documentation links.
-     *
-     * No page.evaluate().
+     * Discover internal pages.
      */
     const anchors =
       page.locator(
@@ -1075,7 +1156,8 @@ while (
     const anchorCount =
       await anchors.count();
 
-    let discovered = 0;
+    let discovered =
+      0;
 
     for (
       let i = 0;
@@ -1100,33 +1182,29 @@ while (
             finalUrl,
           );
 
-        /*
-         * Only HTTP(S).
-         */
         if (
-          url.protocol !== "http:" &&
-          url.protocol !== "https:"
+          url.protocol !==
+            "http:" &&
+          url.protocol !==
+            "https:"
         ) {
           continue;
         }
 
         /*
-         * Pure same-page anchors aren't pages.
+         * Same-page #anchor.
          */
         if (
           url.pathname ===
-          new URL(
-            finalUrl,
-          ).pathname &&
+            new URL(
+              finalUrl,
+            ).pathname &&
           url.search === "" &&
           url.hash
         ) {
           continue;
         }
 
-        /*
-         * External links aren't crawled.
-         */
         if (
           !inScope(
             url.href,
@@ -1140,24 +1218,55 @@ while (
             url.href,
           );
 
+        /*
+         * Already downloaded?
+         */
         if (
-          !visited.has(
-            normalized,
-          ) &&
-          !queued.has(
+          manifest.pages[
+            normalized
+          ]?.status ===
+          "downloaded"
+        ) {
+          continue;
+        }
+
+        /*
+         * Already queued?
+         */
+        if (
+          manifest.queue.includes(
             normalized,
           )
         ) {
-          queue.push(
-            normalized,
-          );
-
-          queued.add(
-            normalized,
-          );
-
-          discovered++;
+          continue;
         }
+
+        manifest.queue.push(
+          normalized,
+        );
+
+        /*
+         * Record queued page.
+         */
+        if (
+          !manifest.pages[
+            normalized
+          ]
+        ) {
+          manifest.pages[
+            normalized
+          ] = {
+            path:
+              pageOutputPath(
+                normalized,
+              ),
+
+            status:
+              "queued",
+          };
+        }
+
+        discovered++;
       } catch {
         // Ignore malformed URLs.
       }
@@ -1167,107 +1276,166 @@ while (
       `  discovered ${discovered} new pages`,
     );
 
+    pagesThisRun++;
+
     /*
-     * Persist state after EVERY successfully
-     * processed page.
+     * Persist after every page.
+     *
+     * This is what makes the crawler
+     * safely resumable.
      */
-    await saveCrawlState(
-      queue,
-      queued,
-      visited,
-      pages,
-      resources,
+    await saveManifest(
+      manifest,
     );
   } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : String(error);
+
     console.error(
-      `  ERROR: ${error}`,
+      `  ERROR: ${message}`,
     );
 
     /*
-     * Persist whatever we have so far even
-     * when a page fails.
+     * Mark the requested page as
+     * failed, but don't permanently
+     * lose it.
+     *
+     * Put it back at the end of the
+     * queue so a later resume can retry.
      */
-    await saveCrawlState(
-      queue,
-      queued,
-      visited,
-      pages,
-      resources,
-    );
-  }
-}
+    manifest.pages[
+      requestedUrl
+    ] = {
+      path:
+        pageOutputPath(
+          requestedUrl,
+        ),
 
-console.log();
-console.log(
-  `Phase 1 complete: ${pages.size} page URLs`,
-);
+      status:
+        "failed",
 
-if (
-  visited.size >= maxPages &&
-  queue.length > 0
-) {
-  console.log(
-    `⚠️  Crawl stopped because MAX_PAGES=${maxPages} was reached.`,
-  );
+      error:
+        message,
+    };
 
-  console.log(
-    `    Pages crawled: ${visited.size}`,
-  );
-
-  console.log(
-    `    Pages remaining in queue: ${queue.length}`,
-  );
-} else if (
-  queue.length === 0
-) {
-  console.log(
-    "✓ Crawl completed: queue is empty.",
-  );
-
-  console.log(
-    `  Pages crawled: ${visited.size}`,
-  );
-} else {
-  console.log(
-    "Crawl stopped for another reason.",
-  );
-
-  console.log(
-    `  Pages crawled: ${visited.size}`,
-  );
-
-  console.log(
-    `  Pages remaining in queue: ${queue.length}`,
-  );
-}
-
-console.log(
-  `Resources discovered: ${resources.size}`,
-);
-
-/*
- * If the queue is empty, the crawl is genuinely
- * complete, so the resume state is no longer needed.
- */
-if (
-  queue.length === 0
-) {
-  try {
-    await fs.unlink(
-      stateFile,
+    manifest.queue.push(
+      requestedUrl,
     );
 
-    console.log(
-      `✓ Removed crawl state: ${stateFile}`,
+    await saveManifest(
+      manifest,
     );
-  } catch {
-    // State file may not exist.
   }
 }
 
 /*
  * ============================================================
+ * END OF CRAWL / RESUME INFORMATION
+ * ============================================================
+ */
+
+console.log();
+console.log(
+  "=== CRAWL STATUS ===",
+);
+
+console.log(
+  `Pages processed this run: ${pagesThisRun}`,
+);
+
+console.log(
+  `Pages downloaded: ${
+  Object.values(
+    manifest.pages,
+  ).filter(
+    page =>
+      page.status ===
+      "downloaded",
+  ).length
+}`,
+);
+
+console.log(
+  `Pages remaining in queue: ${manifest.queue.length}`,
+);
+
+console.log(
+  `Resources discovered: ${
+  Object.keys(
+    manifest.resources,
+  ).length
+}`,
+);
+
+if (
+  manifest.queue.length === 0
+) {
+  manifest.scrape.complete =
+    true;
+
+  manifest.scrape.completedAt =
+    now();
+
+  await saveManifest(
+    manifest,
+  );
+
+  console.log();
+  console.log(
+    "✓ Crawl completed: queue is empty.",
+  );
+
+  console.log(
+    `Completed: ${manifest.scrape.completedAt}`,
+  );
+} else if (
+  pagesThisRun >= maxPages
+) {
+  await saveManifest(
+    manifest,
+  );
+
+  console.log();
+  console.log(
+    `⚠ Crawl paused because MAX_PAGES=${maxPages} was reached.`,
+  );
+
+  console.log(
+    `  Pages remaining in queue: ${manifest.queue.length}`,
+  );
+
+  console.log();
+  console.log(
+    "Run the same command again to resume.",
+  );
+} else {
+  await saveManifest(
+    manifest,
+  );
+
+  console.log();
+  console.log(
+    "⚠ Crawl stopped before the queue was empty.",
+  );
+
+  console.log(
+    `  Pages remaining in queue: ${manifest.queue.length}`,
+  );
+}
+
+/*
+ * ============================================================
  * PHASE 2: DOWNLOAD RESOURCES
+ *
+ * IMPORTANT:
+ *
+ * We download resources after page crawling,
+ * but resource downloading is also resumable.
+ *
+ * A resource already marked "downloaded"
+ * is skipped.
  * ============================================================
  */
 
@@ -1276,23 +1444,24 @@ console.log(
   "=== PHASE 2: DOWNLOAD RESOURCES ===",
 );
 
-/*
- * resource URL -> local filesystem path
- */
-const resourceMap =
-  new Map<string, string>();
-
-/*
- * resource URL -> content type
- */
-const resourceContentTypes =
-  new Map<string, string>();
-
-let downloaded = 0;
+let resourcesDownloadedThisRun =
+  0;
 
 for (
-  const resourceUrl of resources.keys()
+  const [
+    resourceUrl,
+    record,
+  ] of Object.entries(
+    manifest.resources,
+  )
+) {
+  if (
+    record.status ===
+    "downloaded"
   ) {
+    continue;
+  }
+
   if (
     isExternalNoise(
       resourceUrl,
@@ -1301,17 +1470,28 @@ for (
     continue;
   }
 
-  const normalized =
-    normalizeUrl(
-      resourceUrl,
-    );
-
-  const destination =
-    assetOutputPath(
-      resourceUrl,
-    );
+  console.log(
+    `→ ${resourceUrl}`,
+  );
 
   try {
+    const result =
+      await downloadResource(
+        context,
+        resourceUrl,
+      );
+
+    if (!result) {
+      throw new Error(
+        "Download failed",
+      );
+    }
+
+    const destination =
+      absoluteRawPath(
+        record.path,
+      );
+
     await fs.mkdir(
       path.dirname(
         destination,
@@ -1321,193 +1501,79 @@ for (
       },
     );
 
-    /*
-     * If the resource already exists,
-     * don't download it again.
-     *
-     * This is particularly useful when
-     * resuming a large crawl.
-     */
-    try {
-      await fs.access(
-        destination,
-      );
-
-      console.log(
-        `  already exists: ${resourceUrl}`,
-      );
-
-      const contentType =
-        resources.get(
-          resourceUrl,
-        )?.contentType ?? "";
-
-      resourceMap.set(
-        normalized,
-        destination,
-      );
-
-      resourceContentTypes.set(
-        normalized,
-        contentType,
-      );
-
-      continue;
-    } catch {
-      /*
-       * File doesn't exist.
-       * Download below.
-       */
-    }
-
-    const result =
-      await downloadResource(
-        context,
-        resourceUrl,
-      );
-
-    if (!result) {
-      continue;
-    }
-
     await fs.writeFile(
       destination,
       result.body,
     );
 
-    resourceMap.set(
-      normalized,
-      destination,
+    record.status =
+      "downloaded";
+
+    record.contentType =
+      result.contentType;
+
+    record.scrapedAt =
+      now();
+
+    delete record.error;
+
+    resourcesDownloadedThisRun++;
+
+    await saveManifest(
+      manifest,
+    );
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : String(error);
+
+    console.error(
+      `  ERROR: ${message}`,
     );
 
-    resourceContentTypes.set(
-      normalized,
-      result.contentType,
-    );
+    record.status =
+      "failed";
 
-    downloaded++;
+    record.error =
+      message;
 
-    console.log(
-      `  ${resourceUrl}`,
-    );
-  } catch {
-    console.log(
-      `  FAILED ${resourceUrl}`,
+    await saveManifest(
+      manifest,
     );
   }
 }
 
 console.log();
 console.log(
-  `Downloaded ${downloaded} resources`,
+  `Resources downloaded this run: ${resourcesDownloadedThisRun}`,
+);
+
+console.log(
+  `Total resources: ${
+  Object.keys(
+    manifest.resources,
+  ).length
+}`,
+);
+
+console.log(
+  `Resources successfully downloaded: ${
+  Object.values(
+    manifest.resources,
+  ).filter(
+    resource =>
+      resource.status ===
+      "downloaded",
+  ).length
+}`,
 );
 
 /*
  * ============================================================
- * REWRITE CSS
+ * FINISH
  * ============================================================
  */
-
-console.log();
-console.log(
-  "=== REWRITE CSS ===",
-);
-
-for (
-  const [
-    resourceUrl,
-    destination,
-  ] of resourceMap
-  ) {
-  const contentType =
-    resourceContentTypes.get(
-      resourceUrl,
-    ) ?? "";
-
-  if (
-    !contentType.includes(
-      "text/css",
-    )
-  ) {
-    continue;
-  }
-
-  try {
-    let css =
-      await fs.readFile(
-        destination,
-        "utf8",
-      );
-
-    css =
-      rewriteCss(
-        css,
-        resourceUrl,
-        resourceMap,
-      );
-
-    await fs.writeFile(
-      destination,
-      css,
-    );
-
-    console.log(
-      `  rewritten ${resourceUrl}`,
-    );
-  } catch {
-    console.log(
-      `  failed CSS ${resourceUrl}`,
-    );
-  }
-}
-
-/*
- * ============================================================
- * WRITE HTML
- * ============================================================
- */
-
-console.log();
-console.log(
-  "=== WRITE HTML ===",
-);
-
-for (
-  const [
-    pageUrl,
-    originalHtml,
-  ] of pages
-  ) {
-  const html =
-    rewriteHtml(
-      originalHtml,
-      pageUrl,
-      resourceMap,
-    );
-
-  const destination =
-    pageOutputPath(
-      pageUrl,
-    );
-
-  await fs.mkdir(
-    path.dirname(
-      destination,
-    ),
-    {
-      recursive: true,
-    },
-  );
-
-  await fs.writeFile(
-    destination,
-    html,
-  );
-
-  console.log(
-    `  ${destination}`,
-  );
-}
 
 await browser.close();
 
@@ -1521,12 +1587,51 @@ console.log(
 console.log(
   "================================",
 );
+
 console.log(
-  `Pages:     ${pages.size}`,
+  `Raw snapshot: ${path.resolve(
+  rawDir,
+)}`,
 );
+
 console.log(
-  `Resources: ${resourceMap.size}`,
+  `Manifest: ${path.resolve(
+  manifestPath,
+)}`,
 );
+
 console.log(
-  `Output:    ${path.resolve(outputDir)}`,
+  `Started: ${manifest.scrape.startedAt}`,
+);
+
+console.log(
+  `Last updated: ${manifest.scrape.lastUpdatedAt}`,
+);
+
+console.log(
+  `Complete: ${manifest.scrape.complete}`,
+);
+
+if (
+  manifest.scrape.completedAt
+) {
+  console.log(
+    `Completed: ${manifest.scrape.completedAt}`,
+  );
+}
+
+console.log(
+  `Pages: ${Object.keys(
+  manifest.pages,
+).length}`,
+);
+
+console.log(
+  `Resources: ${Object.keys(
+  manifest.resources,
+).length}`,
+);
+
+console.log(
+  `Queue: ${manifest.queue.length}`,
 );

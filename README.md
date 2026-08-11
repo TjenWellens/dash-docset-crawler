@@ -1,4 +1,11 @@
 
+
+```shell
+npx tsx crawl.ts \
+  https://orm.drizzle.team/docs/ \
+  docs/drizzle/raw
+```
+
 ## run the crawler (including url localizer)
 run the crawler
 ```shell
