@@ -19,5 +19,16 @@ open docs/drizzle/local/pages/orm.drizzle.team/docs/overview.html
 
 ## (3) package into docset
 ```shell
-npx tsx package.ts drizzle
+npx tsx package.ts drizzle 
+```
+
+(optional) inspect searchIndex
+```shell
+sqlite3 docs/drizzle/drizzle.docset/Contents/Resources/docSet.dsidx \
+  'SELECT * FROM searchIndex;'
+```
+
+open in dash
+```shell
+open docs/drizzle/drizzle.docset
 ```
