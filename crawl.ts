@@ -1,4 +1,4 @@
-import { chromium } from "playwright";
+import { chromium, type Response } from "playwright";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -67,7 +67,6 @@ function pageOutputPath(raw: string): string {
 function assetOutputPath(raw: string): string {
   const url = new URL(raw);
 
-  // Keep the URL's original path.
   let pathname = url.pathname.replace(/^\/+/, "");
 
   if (!pathname) {
@@ -79,6 +78,109 @@ function assetOutputPath(raw: string): string {
     url.hostname,
     "_assets",
     pathname
+  );
+}
+
+function shouldCapture(response: Response): boolean {
+  const url = response.url();
+
+  if (!url.startsWith("http://") && !url.startsWith("https://")) {
+    return false;
+  }
+
+  const type = response.request().resourceType();
+
+  // Capture the things that normally affect visual rendering.
+  if (
+    type === "stylesheet" ||
+    type === "font" ||
+    type === "image"
+  ) {
+    return true;
+  }
+
+  const contentType =
+    response.headers()["content-type"] ?? "";
+
+  if (
+    contentType.includes("text/css") ||
+    contentType.startsWith("font/") ||
+    contentType.includes("application/font")
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function isExternalNoise(raw: string): boolean {
+  const url = new URL(raw);
+
+  const hostname = url.hostname;
+
+  return (
+    hostname.includes("google-analytics") ||
+    hostname.includes("googletagmanager") ||
+    hostname.includes("analytics") ||
+    hostname.includes("ahrefs") ||
+    hostname.includes("algolia") ||
+    hostname.includes("onedollarstats") ||
+    hostname.includes("doubleclick")
+  );
+}
+
+function relativeAssetUrl(
+  pageUrl: string,
+  assetUrl: string,
+  destination: string
+): string {
+  const pagePath = pageOutputPath(pageUrl);
+
+  let relative = path.relative(
+    path.dirname(pagePath),
+    destination
+  );
+
+  return relative.split(path.sep).join("/");
+}
+
+function rewriteCss(
+  css: string,
+  cssUrl: string,
+  assetMap: Map<string, string>
+): string {
+  return css.replace(
+    /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi,
+    (match, quote, rawUrl) => {
+      if (
+        rawUrl.startsWith("data:") ||
+        rawUrl.startsWith("#")
+      ) {
+        return match;
+      }
+
+      try {
+        const absolute = normalizeUrl(
+          new URL(rawUrl, cssUrl).href
+        );
+
+        const destination = assetMap.get(absolute);
+
+        if (!destination) {
+          return match;
+        }
+
+        const relative = relativeAssetUrl(
+          cssUrl,
+          absolute,
+          destination
+        );
+
+        return `url("${relative}")`;
+      } catch {
+        return match;
+      }
+    }
   );
 }
 
@@ -100,39 +202,35 @@ while (queue.length > 0 && visited.size < maxPages) {
 
   console.log(`→ ${requestedUrl}`);
 
-  // Resources loaded by this page.
-  const resources = new Map<string, Buffer>();
+  const resources = new Map<
+    string,
+    {
+      body: Buffer;
+      contentType: string;
+    }
+  >();
 
-  const responseHandler = async (response: any) => {
+  const responseHandler = async (response: Response) => {
     try {
-      const url = response.url();
-
-      // Only capture HTTP(S) resources.
-      if (!url.startsWith("http://") && !url.startsWith("https://")) {
+      if (!shouldCapture(response)) {
         return;
       }
 
-      const contentType =
-        response.headers()["content-type"] ?? "";
-
-      // Capture things that are useful offline.
-      const interesting =
-        contentType.includes("text/css") ||
-        contentType.includes("javascript") ||
-        contentType.includes("font/") ||
-        contentType.includes("image/") ||
-        contentType.includes("application/font") ||
-        contentType.includes("application/octet-stream");
-
-      if (!interesting) {
+      if (isExternalNoise(response.url())) {
         return;
       }
+
+      const url = normalizeUrl(response.url());
 
       const body = await response.body();
 
-      resources.set(normalizeUrl(url), body);
+      resources.set(url, {
+        body,
+        contentType:
+          response.headers()["content-type"] ?? "",
+      });
     } catch {
-      // Some responses cannot have their body read.
+      // Some browser responses cannot be read.
     }
   };
 
@@ -168,49 +266,40 @@ while (queue.length > 0 && visited.size < maxPages) {
       continue;
     }
 
-    await page.waitForTimeout(500);
-
-    // Wait a moment for late resources.
-    await page.waitForTimeout(500);
+    // Allow lazy-loaded assets to appear.
+    await page.waitForTimeout(1000);
 
     visited.add(requestedUrl);
     visited.add(finalUrl);
 
-    console.log(`  captured ${resources.size} resources`);
+    console.log(`  captured ${resources.size} assets`);
 
-    // Save resources.
     const assetMap = new Map<string, string>();
 
-    for (const [url, body] of resources) {
+    // Save assets first so CSS can reference them.
+    for (const [url, resource] of resources) {
       const destination = assetOutputPath(url);
 
       await fs.mkdir(path.dirname(destination), {
         recursive: true,
       });
 
-      await fs.writeFile(destination, body);
+      await fs.writeFile(destination, resource.body);
 
       assetMap.set(url, destination);
-
-      console.log(`  asset ${url}`);
     }
 
-    // Get rendered HTML.
     let html = await page.content();
 
-    // Rewrite captured resource URLs.
+    // Rewrite HTML resource URLs.
     for (const [url, destination] of assetMap) {
-      const pagePath = pageOutputPath(finalUrl);
+      const parsed = new URL(url);
 
-      let relative = path.relative(
-        path.dirname(pagePath),
+      const relative = relativeAssetUrl(
+        finalUrl,
+        url,
         destination
       );
-
-      relative = relative.split(path.sep).join("/");
-
-      // Replace both absolute URLs and paths.
-      const parsed = new URL(url);
 
       const replacements = [
         url,
@@ -220,6 +309,29 @@ while (queue.length > 0 && visited.size < maxPages) {
       for (const original of replacements) {
         html = html.split(original).join(relative);
       }
+    }
+
+    // Rewrite CSS resources recursively.
+    for (const [url, resource] of resources) {
+      if (!resource.contentType.includes("text/css")) {
+        continue;
+      }
+
+      const destination = assetMap.get(url);
+
+      if (!destination) {
+        continue;
+      }
+
+      let css = resource.body.toString("utf8");
+
+      css = rewriteCss(
+        css,
+        url,
+        assetMap
+      );
+
+      await fs.writeFile(destination, css);
     }
 
     const destination = pageOutputPath(finalUrl);
@@ -232,7 +344,7 @@ while (queue.length > 0 && visited.size < maxPages) {
 
     console.log(`  saved ${destination}`);
 
-    // Discover navigation links.
+    // Discover documentation links.
     const links = await page.locator("a[href]").evaluateAll(
       (anchors) =>
         anchors
@@ -272,6 +384,7 @@ await browser.close();
 
 console.log();
 console.log(`Crawled ${visited.size} URLs.`);
+
 if (visited.size >= maxPages) {
   console.log(`Stopped at MAX_PAGES=${maxPages}`);
 }
