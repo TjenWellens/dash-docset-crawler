@@ -12,13 +12,34 @@ if (!startUrl) {
 
 const start = new URL(startUrl);
 
-// Only crawl URLs under the starting path.
-// e.g. /docs/ means /docs/foo is allowed, /blog/foo isn't.
+// Normalize the starting URL.
+start.hash = "";
+start.search = "";
+
 const scopePath = start.pathname.endsWith("/")
   ? start.pathname
   : start.pathname + "/";
 
-function inScope(url: URL) {
+function normalizeUrl(raw: string): string {
+  const url = new URL(raw);
+
+  // Fragments don't identify separate documents.
+  url.hash = "";
+
+  // Query parameters often create duplicate pages in docs sites.
+  url.search = "";
+
+  // Normalize trailing slash.
+  if (url.pathname !== "/" && url.pathname.endsWith("/")) {
+    url.pathname = url.pathname.slice(0, -1);
+  }
+
+  return url.href;
+}
+
+function inScope(raw: string): boolean {
+  const url = new URL(raw);
+
   return (
     url.origin === start.origin &&
     (url.pathname === start.pathname ||
@@ -26,56 +47,96 @@ function inScope(url: URL) {
   );
 }
 
-function outputPath(url: URL) {
+function outputPath(raw: string): string {
+  const url = new URL(raw);
+
   let pathname = url.pathname;
 
-  if (pathname.endsWith("/")) {
-    pathname += "index.html";
+  if (pathname === "/" || pathname === "") {
+    pathname = "index.html";
   } else {
-    pathname += ".html";
+    pathname = pathname.replace(/^\/+/, "");
+
+    if (pathname.endsWith("/")) {
+      pathname += "index.html";
+    } else {
+      pathname += ".html";
+    }
   }
 
   return path.join(
     outputDir,
     url.hostname,
-    pathname.replace(/^\/+/, "")
+    pathname
   );
 }
 
 await fs.mkdir(outputDir, { recursive: true });
 
 const browser = await chromium.launch();
+
 const page = await browser.newPage();
 
-const queue: string[] = [start.href];
+const queue: string[] = [normalizeUrl(start.href)];
+const queued = new Set(queue);
 const visited = new Set<string>();
 
 while (queue.length > 0) {
-  const url = queue.shift()!;
+  const requestedUrl = queue.shift()!;
 
-  if (visited.has(url)) continue;
-  visited.add(url);
+  if (visited.has(requestedUrl)) {
+    continue;
+  }
 
-  console.log(`→ ${url}`);
+  console.log(`→ ${requestedUrl}`);
 
   try {
-    await page.goto(url, {
+    const response = await page.goto(requestedUrl, {
       waitUntil: "networkidle",
       timeout: 60_000,
     });
 
-    // Give client-side navigation/rendering a little extra time.
+    if (!response) {
+      console.log("  no response");
+      continue;
+    }
+
+    // IMPORTANT:
+    // page.url() is the URL after redirects.
+    const finalUrl = normalizeUrl(page.url());
+
+    if (finalUrl !== requestedUrl) {
+      console.log(`  redirect → ${finalUrl}`);
+    }
+
+    // Don't save pages that redirected outside our scope.
+    if (!inScope(finalUrl)) {
+      console.log(`  outside scope, skipping`);
+      continue;
+    }
+
+    if (!response.ok()) {
+      console.log(`  HTTP ${response.status()}, skipping`);
+      continue;
+    }
+
+    visited.add(requestedUrl);
+    visited.add(finalUrl);
+
+    // Give client-side navigation/rendering a little time.
     await page.waitForTimeout(500);
 
     const html = await page.content();
 
-    const destination = outputPath(new URL(url));
+    const destination = outputPath(finalUrl);
 
     await fs.mkdir(path.dirname(destination), {
       recursive: true,
     });
 
     await fs.writeFile(destination, html);
+
+    console.log(`  saved ${destination}`);
 
     const links = await page.locator("a[href]").evaluateAll(
       (anchors) =>
@@ -84,23 +145,27 @@ while (queue.length > 0) {
           .filter(Boolean)
     );
 
+    let discovered = 0;
+
     for (const href of links) {
       try {
-        const next = new URL(href);
+        const normalized = normalizeUrl(href);
 
-        // Remove fragments.
-        next.hash = "";
-
-        if (inScope(next) && !visited.has(next.href)) {
-          queue.push(next.href);
+        if (
+          inScope(normalized) &&
+          !visited.has(normalized) &&
+          !queued.has(normalized)
+        ) {
+          queue.push(normalized);
+          queued.add(normalized);
+          discovered++;
         }
       } catch {
         // Ignore malformed URLs.
       }
     }
 
-    console.log(`  saved ${destination}`);
-    console.log(`  discovered ${links.length} links`);
+    console.log(`  discovered ${discovered} new pages`);
   } catch (error) {
     console.error(`  ERROR: ${error}`);
   }
@@ -109,4 +174,4 @@ while (queue.length > 0) {
 await browser.close();
 
 console.log();
-console.log(`Crawled ${visited.size} pages.`);
+console.log(`Crawled ${visited.size} URLs.`);
