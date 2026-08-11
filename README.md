@@ -1,11 +1,11 @@
 
-(1) crawl raw pages
+## (1) crawl raw pages
 ```shell
 MAX_PAGES=5 npx tsx crawl.ts \
   https://orm.drizzle.team/docs/ \
   docs/drizzle/raw
 ```
-(2) localize for offline use
+## (2) localize for offline use
 ```shell
 npx tsx localize.ts \
   docs/drizzle/raw \
@@ -17,43 +17,18 @@ inspect
 open docs/drizzle/local/pages/orm.drizzle.team/docs/overview.html
 ```
 
-(3) package into docset
-
----
-
----
-
-# old stuff
-
-## run the crawler (including url localizer)
-run the crawler
-```shell
-rm -rf test-drizzle
-
-MAX_PAGES=10 npx tsx crawl.ts \
-  https://orm.drizzle.team/docs/ \
-  ./test-drizzle
-```
-
-open crawled page in browser
-```shell
-open test-drizzle/orm.drizzle.team/docs/overview.html
-```
-
-## create docset from local html
+## (3) package into docset
 copy crawled pages into docset folder structure
 ```shell
-rm -rf test-drizzle.docset
+mkdir -p docs/drizzle/drizzle.docset/Contents/Resources
 
-mkdir -p test-drizzle.docset/Contents/Resources
-
-cp -R test-drizzle/. \
-  test-drizzle.docset/Contents/Resources/Documents
+cp -R docs/drizzle/local/. \
+  docs/drizzle/drizzle.docset/Contents/Resources
 ```
 
 create plist
 ```shell
-cat > test-drizzle.docset/Contents/Info.plist <<'EOF'
+cat > docs/drizzle/drizzle.docset/Contents/Info.plist <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd"\>
@@ -84,7 +59,7 @@ EOF
 populate db 
 - [ ] todo: add more searchIndex
 ```shell
-sqlite3 test-drizzle.docset/Contents/Resources/docSet.dsidx <<'SQL'                          
+sqlite3 docs/drizzle/drizzle.docset/Contents/Resources/docSet.dsidx <<'SQL'                          
 CREATE TABLE searchIndex (                 
     id INTEGER PRIMARY KEY,
     name TEXT,
@@ -105,11 +80,11 @@ SQL
 
 (optional) see in db current searchIndex
 ```shell
-sqlite3 test-drizzle.docset/Contents/Resources/docSet.dsidx \
+sqlite3 docs/drizzle/drizzle.docset/Contents/Resources/docSet.dsidx \
   'SELECT * FROM searchIndex;'
 ```
 
 open in dash
 ```shell
-open test-drizzle.docset
+open docs/drizzle/drizzle.docset
 ```
