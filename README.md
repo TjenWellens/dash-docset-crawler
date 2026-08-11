@@ -1,10 +1,13 @@
 
-
+(1) crawl raw pages
 ```shell
-npx tsx crawl.ts \
+MAX_PAGES=5 npx tsx crawl.ts \
   https://orm.drizzle.team/docs/ \
   docs/drizzle/raw
 ```
+(2) localize for offline use
+
+(3) package into docset
 
 ## run the crawler (including url localizer)
 run the crawler
