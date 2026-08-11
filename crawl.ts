@@ -930,6 +930,19 @@ console.log(
   `Phase 1 complete: ${pages.size} page URLs`,
 );
 
+if (visited.size >= maxPages && queue.length > 0) {
+  console.log(`⚠️  Crawl stopped because MAX_PAGES=${maxPages} was reached.`);
+  console.log(`    Pages crawled: ${visited.size}`);
+  console.log(`    Pages remaining in queue: ${queue.length}`);
+} else if (queue.length === 0) {
+  console.log("✓ Crawl completed: queue is empty.");
+  console.log(`  Pages crawled: ${visited.size}`);
+} else {
+  console.log("Crawl stopped for another reason.");
+  console.log(`  Pages crawled: ${visited.size}`);
+  console.log(`  Pages remaining in queue: ${queue.length}`);
+}
+
 console.log(
   `Resources discovered: ${resources.size}`,
 );
