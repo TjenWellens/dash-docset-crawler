@@ -5,17 +5,23 @@ const rawDir = process.argv[2];
 
 if (!rawDir) {
   console.error(
-    "Usage: npx tsx localize.ts <raw-dir> [localized-dir]",
+    "Usage: npx tsx localize.ts <raw-dir> [local-dir]",
   );
   process.exit(1);
 }
 
 const localizedDir =
   process.argv[3] ??
-  rawDir.replace(/\/raw$/, "/localized");
+  rawDir.replace(/\/raw$/, "/local");
 
 const manifestPath =
   path.join(rawDir, "manifest.json");
+
+/*
+ * ============================================================
+ * TYPES
+ * ============================================================
+ */
 
 type ManifestPage = {
   path: string;
@@ -28,6 +34,7 @@ type ManifestResource = {
   status: string;
   contentType?: string;
   downloadedAt?: string;
+  scrapedAt?: string;
 };
 
 type Manifest = {
@@ -52,8 +59,67 @@ type Manifest = {
 
   pages: Record<string, ManifestPage>;
 
-  resources?: Record<string, ManifestResource>;
+  resources?: Record<
+    string,
+    ManifestResource
+  >;
 };
+
+type LocalizedManifestPage = {
+  path: string;
+  sourcePath: string;
+  status: "localized";
+};
+
+type LocalizedManifestResource = {
+  path: string;
+  sourcePath: string;
+  status: "localized";
+  contentType?: string;
+};
+
+type LocalizedManifest = {
+  version: number;
+
+  site: {
+    name: string;
+    startUrl: string;
+  };
+
+  scope: {
+    origin: string;
+    path: string;
+  };
+
+  source: {
+    manifest: string;
+    scrapedAt: string | null;
+    complete: boolean;
+  };
+
+  localizedAt: string;
+
+  pages: Record<
+    string,
+    LocalizedManifestPage
+  >;
+
+  resources: Record<
+    string,
+    LocalizedManifestResource
+  >;
+
+  stats: {
+    pages: number;
+    resources: number;
+  };
+};
+
+/*
+ * ============================================================
+ * READ MANIFEST
+ * ============================================================
+ */
 
 const manifestText =
   await fs.readFile(
@@ -73,8 +139,12 @@ const scopePath =
     : manifest.scope.path + "/";
 
 console.log("=== LOCALIZE ===");
-console.log(`Raw:       ${path.resolve(rawDir)}`);
-console.log(`Localized: ${path.resolve(localizedDir)}`);
+console.log(
+  `Raw:       ${path.resolve(rawDir)}`,
+);
+console.log(
+  `Localized: ${path.resolve(localizedDir)}`,
+);
 console.log();
 
 if (!manifest.resources) {
@@ -89,6 +159,11 @@ if (!manifest.resources) {
  * ============================================================
  */
 
+/**
+ * Normalize a URL so that query strings,
+ * hashes and trailing slashes don't affect
+ * resource/page matching.
+ */
 function normalizeUrl(raw: string): string {
   const url = new URL(raw);
 
@@ -112,17 +187,20 @@ function inScope(raw: string): boolean {
   return (
     url.origin === origin &&
     (
-      url.pathname === scopePath.slice(0, -1) ||
+      url.pathname ===
+        scopePath.slice(0, -1) ||
       url.pathname.startsWith(scopePath)
     )
   );
 }
 
 /**
- * Turn a manifest-relative page path into
+ * Turn a manifest-relative path into
  * an absolute path inside rawDir.
  */
-function rawPath(relativePath: string): string {
+function rawPath(
+  relativePath: string,
+): string {
   return path.join(
     rawDir,
     relativePath,
@@ -130,8 +208,8 @@ function rawPath(relativePath: string): string {
 }
 
 /**
- * Turn a manifest-relative page path into
- * the corresponding path inside localizedDir.
+ * Turn a manifest-relative path into
+ * an absolute path inside localizedDir.
  */
 function localizedPath(
   relativePath: string,
@@ -143,8 +221,8 @@ function localizedPath(
 }
 
 /**
- * Calculate a relative URL from one local file
- * to another.
+ * Calculate a relative URL/path from one
+ * local file to another.
  */
 function relativeLocalPath(
   fromFile: string,
@@ -160,8 +238,8 @@ function relativeLocalPath(
 }
 
 /**
- * Determine whether a resource path has
- * a recognizable file extension.
+ * Determine whether a path has a file
+ * extension.
  */
 function hasExtension(
   filePath: string,
@@ -175,16 +253,14 @@ function hasExtension(
 }
 
 /**
- * If a CSS resource has no extension,
- * localize it as .css.
+ * CSS resources such as:
  *
- * Example:
+ *   @docsearch/css@3
  *
- *   resources/.../@docsearch/css@3
+ * don't necessarily have a file extension.
  *
- * becomes:
- *
- *   resources/.../@docsearch/css@3.css
+ * Give CSS files a .css extension in
+ * the localized package.
  */
 function localizedResourcePath(
   resource: ManifestResource,
@@ -208,22 +284,49 @@ function localizedResourcePath(
   );
 }
 
+/*
+ * ============================================================
+ * BUILD URL LOOKUPS
+ * ============================================================
+ */
+
 /**
- * Build a lookup of normalized resource URL
- * -> localized filesystem path.
+ * Normalized resource URL
+ * ->
+ * localized filesystem path.
  */
 const resourceMap =
   new Map<string, string>();
 
+/**
+ * Normalized resource URL
+ * ->
+ * original manifest resource.
+ *
+ * This is separate from resourceMap because
+ * normalizeUrl() may change the manifest key.
+ */
+const resourceEntryMap =
+  new Map<
+    string,
+    {
+      url: string;
+      resource: ManifestResource;
+    }
+  >();
+
 if (manifest.resources) {
   for (
-    const [resourceUrl, resource]
-    of Object.entries(
+    const [
+      resourceUrl,
+      resource,
+    ] of Object.entries(
       manifest.resources,
     )
   ) {
     if (
-      resource.status !== "downloaded"
+      resource.status !==
+      "downloaded"
     ) {
       continue;
     }
@@ -231,16 +334,30 @@ if (manifest.resources) {
     const normalized =
       normalizeUrl(resourceUrl);
 
+    const destination =
+      localizedResourcePath(
+        resource,
+      );
+
     resourceMap.set(
       normalized,
-      localizedResourcePath(resource),
+      destination,
+    );
+
+    resourceEntryMap.set(
+      normalized,
+      {
+        url: resourceUrl,
+        resource,
+      },
     );
   }
 }
 
 /**
- * Build a lookup of normalized page URL
- * -> localized filesystem path.
+ * Normalized page URL
+ * ->
+ * localized filesystem path.
  *
  * Only downloaded pages are included.
  */
@@ -248,13 +365,16 @@ const pageMap =
   new Map<string, string>();
 
 for (
-  const [pageUrl, page]
-  of Object.entries(
+  const [
+    pageUrl,
+    page,
+  ] of Object.entries(
     manifest.pages,
   )
 ) {
   if (
-    page.status !== "downloaded"
+    page.status !==
+    "downloaded"
   ) {
     continue;
   }
@@ -274,6 +394,53 @@ console.log(
 );
 
 console.log();
+
+/*
+ * ============================================================
+ * CREATE LOCALIZED MANIFEST
+ * ============================================================
+ */
+
+const localizedManifest: LocalizedManifest = {
+  version: 1,
+
+  site: {
+    name: manifest.site.name,
+    startUrl: manifest.site.startUrl,
+  },
+
+  scope: {
+    origin: manifest.scope.origin,
+    path: manifest.scope.path,
+  },
+
+  source: {
+    manifest: path.relative(
+      localizedDir,
+      manifestPath,
+    ),
+
+    scrapedAt:
+      manifest.scrape.completedAt ??
+      manifest.scrape.lastUpdatedAt ??
+      null,
+
+    complete:
+      manifest.scrape.complete,
+  },
+
+  localizedAt:
+    new Date().toISOString(),
+
+  pages: {},
+
+  resources: {},
+
+  stats: {
+    pages: 0,
+    resources: 0,
+  },
+};
 
 /*
  * ============================================================
@@ -312,8 +479,10 @@ function rewriteCss(
       }
 
       if (
-        absolute.protocol !== "http:" &&
-        absolute.protocol !== "https:"
+        absolute.protocol !==
+          "http:" &&
+        absolute.protocol !==
+          "https:"
       ) {
         return match;
       }
@@ -332,16 +501,12 @@ function rewriteCss(
         /*
          * Resource wasn't downloaded.
          *
-         * Keep the original CSS reference.
+         * Keep the original CSS
+         * reference rather than guessing.
          */
         return match;
       }
 
-      /*
-       * We need the localized CSS file's
-       * location as the source of the
-       * relative path.
-       */
       const source =
         localizedCssSourcePath(
           cssUrl,
@@ -359,8 +524,8 @@ function rewriteCss(
 }
 
 /**
- * Find where a CSS resource lives in
- * localizedDir.
+ * Find where a CSS resource lives
+ * in localizedDir.
  */
 function localizedCssSourcePath(
   cssUrl: string,
@@ -377,24 +542,28 @@ function localizedCssSourcePath(
     return destination;
   }
 
-  /*
-   * This should normally never happen,
-   * but gives us a deterministic fallback.
-   */
-  const resource =
-    manifest.resources?.[normalized];
+  const entry =
+    resourceEntryMap.get(
+      normalized,
+    );
 
-  if (resource) {
+  if (entry) {
     return localizedResourcePath(
-      resource,
+      entry.resource,
     );
   }
+
+  /*
+   * Deterministic fallback.
+   */
+  const url =
+    new URL(cssUrl);
 
   return path.join(
     localizedDir,
     "resources",
-    new URL(cssUrl).hostname,
-    new URL(cssUrl).pathname.replace(
+    url.hostname,
+    url.pathname.replace(
       /^\/+/,
       "",
     ),
@@ -476,7 +645,7 @@ function rewriteHtml(
       }
 
       /*
-       * Preserve #anchor.
+       * Preserve anchors.
        */
       const hash =
         absolute.hash;
@@ -565,8 +734,7 @@ if (manifest.resources) {
     const [
       resourceUrl,
       resource,
-    ]
-    of Object.entries(
+    ] of Object.entries(
       manifest.resources,
     )
   ) {
@@ -598,7 +766,7 @@ if (manifest.resources) {
       );
 
       /*
-       * Read the raw resource.
+       * Read raw resource.
        */
       let body =
         await fs.readFile(
@@ -637,6 +805,33 @@ if (manifest.resources) {
         body,
       );
 
+      /*
+       * Add successfully localized
+       * resource to the new manifest.
+       */
+      localizedManifest.resources[
+        resourceUrl
+      ] = {
+        path: path.relative(
+          localizedDir,
+          destination,
+        ),
+
+        sourcePath:
+          resource.path,
+
+        status: "localized",
+
+        ...(resource.contentType
+          ? {
+              contentType:
+                resource.contentType,
+            }
+          : {}),
+      };
+
+      localizedManifest.stats.resources++;
+
       resourceCount++;
 
       console.log(
@@ -646,6 +841,7 @@ if (manifest.resources) {
       console.error(
         `  FAILED ${resourceUrl}`,
       );
+
       console.error(
         `    ${error}`,
       );
@@ -673,15 +869,12 @@ for (
   const [
     pageUrl,
     page,
-  ]
-  of Object.entries(
+  ] of Object.entries(
     manifest.pages,
   )
 ) {
   /*
-   * This is the important part:
-   *
-   * only process pages that actually
+   * Only process pages that actually
    * exist in the raw crawl.
    */
   if (
@@ -729,6 +922,26 @@ for (
       "utf8",
     );
 
+    /*
+     * Add successfully localized
+     * page to the new manifest.
+     */
+    localizedManifest.pages[
+      pageUrl
+    ] = {
+      path: path.relative(
+        localizedDir,
+        destination,
+      ),
+
+      sourcePath:
+        page.path,
+
+      status: "localized",
+    };
+
+    localizedManifest.stats.pages++;
+
     pageCount++;
 
     console.log(
@@ -744,6 +957,35 @@ for (
     );
   }
 }
+
+/*
+ * ============================================================
+ * WRITE LOCALIZED MANIFEST
+ * ============================================================
+ */
+
+const localizedManifestPath =
+  path.join(
+    localizedDir,
+    "manifest.json",
+  );
+
+await fs.mkdir(
+  localizedDir,
+  {
+    recursive: true,
+  },
+);
+
+await fs.writeFile(
+  localizedManifestPath,
+  JSON.stringify(
+    localizedManifest,
+    null,
+    2,
+  ) + "\n",
+  "utf8",
+);
 
 /*
  * ============================================================
@@ -776,5 +1018,11 @@ console.log(
 console.log(
   `Output:    ${path.resolve(
   localizedDir,
+)}`,
+);
+
+console.log(
+  `Manifest:  ${path.resolve(
+  localizedManifestPath,
 )}`,
 );
