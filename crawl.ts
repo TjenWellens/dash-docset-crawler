@@ -2,6 +2,8 @@ import { chromium } from "playwright";
 import fs from "node:fs/promises";
 import path from "node:path";
 
+const maxPages = Number(process.env.MAX_PAGES ?? 500);
+
 const startUrl = process.argv[2];
 const outputDir = process.argv[3] ?? "./output";
 
@@ -81,7 +83,7 @@ const queue: string[] = [normalizeUrl(start.href)];
 const queued = new Set(queue);
 const visited = new Set<string>();
 
-while (queue.length > 0) {
+while (queue.length > 0 && visited.size < maxPages) {
   const requestedUrl = queue.shift()!;
 
   if (visited.has(requestedUrl)) {
@@ -175,3 +177,6 @@ await browser.close();
 
 console.log();
 console.log(`Crawled ${visited.size} URLs.`);
+if (visited.size >= maxPages) {
+  console.log(`Stopped at MAX_PAGES=${maxPages}`);
+}
