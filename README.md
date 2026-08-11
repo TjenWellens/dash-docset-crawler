@@ -19,7 +19,9 @@ open docs/drizzle/local/pages/orm.drizzle.team/docs/overview.html
 
 ## (3) package into docset
 ```shell
-npx tsx package.ts drizzle 
+npx tsx package.ts \
+  docs/drizzle/local \
+  docs/drizzle/docset
 ```
 
 (optional) inspect searchIndex
