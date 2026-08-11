@@ -1,5 +1,6 @@
 
 ## run the crawler (including url localizer)
+run the crawler
 ```shell
 rm -rf test-drizzle
 
@@ -8,7 +9,13 @@ MAX_PAGES=10 npx tsx crawl.ts \
   ./test-drizzle
 ```
 
+open crawled page in browser
+```shell
+open test-drizzle/orm.drizzle.team/docs/overview.html
+```
+
 ## create docset from local html
+copy crawled pages into docset folder structure
 ```shell
 rm -rf test-drizzle.docset
 
@@ -79,15 +86,4 @@ sqlite3 test-drizzle.docset/Contents/Resources/docSet.dsidx \
 open in dash
 ```shell
 open test-drizzle.docset
-```
-
-
-
-
-
-## other
-
-open crawled page in browser
-```shell
-open test-drizzle/orm.drizzle.team/docs/overview.html
 ```
