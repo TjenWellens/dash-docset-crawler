@@ -1,0 +1,93 @@
+
+## run the crawler (including url localizer)
+```shell
+rm -rf test-drizzle
+
+MAX_PAGES=10 npx tsx crawl.ts \
+  https://orm.drizzle.team/docs/ \
+  ./test-drizzle
+```
+
+## create docset from local html
+```shell
+rm -rf test-drizzle.docset
+
+mkdir -p test-drizzle.docset/Contents/Resources
+
+cp -R test-drizzle/. \
+  test-drizzle.docset/Contents/Resources/Documents
+```
+
+create plist
+```shell
+cat > test-drizzle.docset/Contents/Info.plist <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd"\>
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>drizzle</string>
+
+    <key>CFBundleName</key>
+    <string>Drizzle ORM</string>
+
+    <key>DocSetPlatformFamily</key>
+    <string>drizzle</string>
+
+    <key>DashDocSetFamily</key>
+    <string>drizzle</string>
+
+    <key>isDashDocset</key>
+    <true/>
+
+    <key>isJavaScriptEnabled</key>
+    <true/>
+</dict>
+</plist>
+EOF
+```
+
+populate db 
+- [ ] todo: add more searchIndex
+```shell
+sqlite3 test-drizzle.docset/Contents/Resources/docSet.dsidx <<'SQL'                          
+CREATE TABLE searchIndex (                 
+    id INTEGER PRIMARY KEY,
+    name TEXT,
+    type TEXT,
+    path TEXT
+);
+
+CREATE UNIQUE INDEX anchor ON searchIndex (name, type, path);
+
+INSERT INTO searchIndex (name, type, path)
+VALUES (
+    'Drizzle ORM',
+    'Guide',
+    'orm.drizzle.team/docs/overview.html'
+);
+SQL
+```
+
+(optional) see in db current searchIndex
+```shell
+sqlite3 test-drizzle.docset/Contents/Resources/docSet.dsidx \
+  'SELECT * FROM searchIndex;'
+```
+
+open in dash
+```shell
+open test-drizzle.docset
+```
+
+
+
+
+
+## other
+
+open crawled page in browser
+```shell
+open test-drizzle/orm.drizzle.team/docs/overview.html
+```
