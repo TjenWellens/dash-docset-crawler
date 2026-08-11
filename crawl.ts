@@ -291,25 +291,54 @@ while (queue.length > 0 && visited.size < maxPages) {
 
     let html = await page.content();
 
-    // Rewrite HTML resource URLs.
-    for (const [url, destination] of assetMap) {
-      const parsed = new URL(url);
+    function rewriteHtmlAssets(
+      html: string,
+      pageUrl: string,
+      assetMap: Map<string, string>
+    ): string {
+      return html.replace(
+        /(src|href)=("([^"]+)"|'([^']+)')/gi,
+        (match, attribute, quoted, doubleUrl, singleUrl) => {
+          const rawUrl = doubleUrl ?? singleUrl;
 
-      const relative = relativeAssetUrl(
-        finalUrl,
-        url,
-        destination
+          if (
+            rawUrl.startsWith("#") ||
+            rawUrl.startsWith("data:") ||
+            rawUrl.startsWith("mailto:") ||
+            rawUrl.startsWith("javascript:")
+          ) {
+            return match;
+          }
+
+          try {
+            const absolute = normalizeUrl(
+              new URL(rawUrl, pageUrl).href
+            );
+
+            const destination = assetMap.get(absolute);
+
+            if (!destination) {
+              return match;
+            }
+
+            const relative = relativeAssetUrl(
+              pageUrl,
+              absolute,
+              destination
+            );
+
+            return `${attribute}="${relative}"`;
+          } catch {
+            return match;
+          }
+        }
       );
-
-      const replacements = [
-        url,
-        parsed.pathname,
-      ];
-
-      for (const original of replacements) {
-        html = html.split(original).join(relative);
-      }
     }
+    html = rewriteHtmlAssets(
+      html,
+      finalUrl,
+      assetMap
+    );
 
     // Rewrite CSS resources recursively.
     for (const [url, resource] of resources) {
