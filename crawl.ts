@@ -1,4 +1,4 @@
-import { chromium } from "playwright";
+import { chromium, type Page } from "playwright";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -19,12 +19,17 @@ const scopePath = start.pathname.endsWith("/")
   ? start.pathname
   : start.pathname + "/";
 
-/* -------------------------------------------------------------------------- */
-/* URL helpers                                                                */
-/* -------------------------------------------------------------------------- */
+type PageRecord = {
+  url: string;
+  html: string;
+  resourceUrls: string[];
+};
 
-function normalizeUrl(raw: string): string {
-  const url = new URL(raw);
+const pages = new Map<string, PageRecord>();
+const resources = new Set<string>();
+
+function normalizeUrl(raw: string, base?: string): string {
+  const url = new URL(raw, base);
 
   url.hash = "";
   url.search = "";
@@ -48,10 +53,31 @@ function inScope(raw: string): boolean {
   );
 }
 
-/* -------------------------------------------------------------------------- */
-/* Output paths                                                               */
-/* -------------------------------------------------------------------------- */
+function isExternalNoise(raw: string): boolean {
+  const url = new URL(raw);
 
+  const hostname = url.hostname;
+
+  return (
+    hostname.includes("google-analytics") ||
+    hostname.includes("googletagmanager") ||
+    hostname.includes("analytics") ||
+    hostname.includes("ahrefs") ||
+    hostname.includes("algolia") ||
+    hostname.includes("onedollarstats") ||
+    hostname.includes("doubleclick")
+  );
+}
+
+/**
+ * Convert a documentation URL into its local HTML path.
+ *
+ * https://orm.drizzle.team/docs/overview
+ *   -> orm.drizzle.team/docs/overview.html
+ *
+ * https://orm.drizzle.team/docs/guides/
+ *   -> orm.drizzle.team/docs/guides/index.html
+ */
 function pageOutputPath(raw: string): string {
   const url = new URL(raw);
 
@@ -69,14 +95,26 @@ function pageOutputPath(raw: string): string {
     }
   }
 
-  return path.join(
-    outputDir,
-    url.hostname,
-    pathname
-  );
+  return path.join(outputDir, url.hostname, pathname);
 }
 
-function assetOutputPath(raw: string): string {
+/**
+ * All non-HTML resources go under:
+ *
+ *   <host>/_assets/<original-path>
+ *
+ * Examples:
+ *
+ * /preferred.css
+ *   -> orm.drizzle.team/_assets/preferred.css
+ *
+ * /_astro/foo.css
+ *   -> orm.drizzle.team/_assets/_astro/foo.css
+ *
+ * /images/foo.png
+ *   -> orm.drizzle.team/_assets/images/foo.png
+ */
+function resourceOutputPath(raw: string): string {
   const url = new URL(raw);
 
   let pathname = url.pathname.replace(/^\/+/, "");
@@ -93,271 +131,264 @@ function assetOutputPath(raw: string): string {
   );
 }
 
-/* -------------------------------------------------------------------------- */
-/* External noise                                                             */
-/* -------------------------------------------------------------------------- */
+function relativePath(
+  fromFile: string,
+  toFile: string
+): string {
+  return path
+    .relative(path.dirname(fromFile), toFile)
+    .split(path.sep)
+    .join("/");
+}
 
-function isExternalNoise(raw: string): boolean {
-  const url = new URL(raw);
-
-  const hostname = url.hostname;
-
-  return (
-    hostname.includes("google-analytics") ||
-    hostname.includes("googletagmanager") ||
-    hostname.includes("analytics") ||
-    hostname.includes("ahrefs") ||
-    hostname.includes("algolia") ||
-    hostname.includes("onedollarstats") ||
-    hostname.includes("doubleclick")
+function localResourceHref(
+  pageUrl: string,
+  resourceUrl: string
+): string {
+  return relativePath(
+    pageOutputPath(pageUrl),
+    resourceOutputPath(resourceUrl)
   );
 }
 
-/* -------------------------------------------------------------------------- */
-/* URL extraction from HTML                                                   */
-/* -------------------------------------------------------------------------- */
-
-function extractAttributeUrls(
-  html: string,
-  attribute: string
-): string[] {
-  const urls: string[] = [];
-
-  const regex = new RegExp(
-    `\\b${attribute}\\s*=\\s*["']([^"']+)["']`,
-    "gi"
+function localPageHref(
+  pageUrl: string,
+  targetUrl: string
+): string {
+  return relativePath(
+    pageOutputPath(pageUrl),
+    pageOutputPath(targetUrl)
   );
-
-  for (const match of html.matchAll(regex)) {
-    urls.push(match[1]);
-  }
-
-  return urls;
 }
 
-function extractSrcsetUrls(
-  html: string
-): string[] {
-  const urls: string[] = [];
-
-  const regex =
-    /\bsrcset\s*=\s*["']([^"']+)["']/gi;
-
-  for (const match of html.matchAll(regex)) {
-    const value = match[1];
-
-    for (const item of value.split(",")) {
-      const url = item.trim().split(/\s+/)[0];
-
-      if (url) {
-        urls.push(url);
-      }
-    }
-  }
-
-  return urls;
-}
-
-function resolveUrl(
-  raw: string,
-  baseUrl: string
-): string | null {
-  if (
-    raw.startsWith("#") ||
-    raw.startsWith("data:") ||
-    raw.startsWith("mailto:") ||
-    raw.startsWith("javascript:") ||
-    raw.startsWith("tel:")
-  ) {
-    return null;
-  }
-
-  try {
-    return normalizeUrl(
-      new URL(raw, baseUrl).href
-    );
-  } catch {
-    return null;
-  }
-}
-
-/*
- * Find things that can represent resources:
+/**
+ * Extract resource URLs from the rendered DOM.
  *
- *   href=
- *   src=
- *   poster=
- *   data=
- *   srcset=
- *
- * We intentionally collect all of them here.
- *
- * Later we classify them using Content-Type.
+ * We intentionally do this from the DOM rather than relying on
+ * Playwright response events. This catches resources that are present
+ * in the page even if they were loaded before our listener was attached.
  */
-function discoverResourceUrls(
+async function collectResourceUrls(page: Page): Promise<string[]> {
+  return await page.evaluate(() => {
+    const urls = new Set<string>();
+
+    const add = (value: string | null) => {
+      if (!value) return;
+
+      try {
+        const absolute = new URL(value, document.baseURI);
+
+        if (
+          absolute.protocol === "http:" ||
+          absolute.protocol === "https:"
+        ) {
+          absolute.hash = "";
+          absolute.search = "";
+
+          urls.add(absolute.href);
+        }
+      } catch {
+        // Ignore malformed URLs.
+      }
+    };
+
+    // Stylesheets
+    document
+      .querySelectorAll<HTMLLinkElement>(
+        'link[rel="stylesheet"], link[href]'
+      )
+      .forEach((el) => add(el.getAttribute("href")));
+
+    // Images
+    document
+      .querySelectorAll<HTMLImageElement>("img[src]")
+      .forEach((el) => add(el.getAttribute("src")));
+
+    // Source elements
+    document
+      .querySelectorAll<HTMLSourceElement>("source[src], source[srcset]")
+      .forEach((el) => {
+        add(el.getAttribute("src"));
+
+        const srcset = el.getAttribute("srcset");
+
+        if (srcset) {
+          for (const candidate of srcset.split(",")) {
+            const url = candidate.trim().split(/\s+/)[0];
+            add(url);
+          }
+        }
+      });
+
+    // Scripts
+    document
+      .querySelectorAll<HTMLScriptElement>("script[src]")
+      .forEach((el) => add(el.getAttribute("src")));
+
+    // Video/audio
+    document
+      .querySelectorAll<HTMLMediaElement>("video[src], audio[src]")
+      .forEach((el) => add(el.getAttribute("src")));
+
+    // Favicon and other link resources
+    document
+      .querySelectorAll<HTMLLinkElement>(
+        "link[href]"
+      )
+      .forEach((el) => {
+        const rel = (el.getAttribute("rel") ?? "").toLowerCase();
+
+        if (
+          rel.includes("icon") ||
+          rel.includes("manifest") ||
+          rel.includes("preload") ||
+          rel.includes("prefetch") ||
+          rel.includes("modulepreload")
+        ) {
+          add(el.getAttribute("href"));
+        }
+      });
+
+    return [...urls];
+  });
+}
+
+/**
+ * Rewrite HTML URLs.
+ *
+ * Rules:
+ *
+ *   #foo
+ *      stays #foo
+ *
+ *   https://example.com/foo
+ *      stays external
+ *
+ *   https://orm.drizzle.team/docs/foo
+ *      becomes local foo.html
+ *
+ *   /preferred.css
+ *      becomes ../_assets/preferred.css
+ *
+ *   /_astro/foo.css
+ *      becomes ../_assets/_astro/foo.css
+ */
+function rewriteHtml(
   html: string,
   pageUrl: string
-): Set<string> {
-  const urls = new Set<string>();
-
-  const attributes = [
-    "href",
-    "src",
-    "poster",
-    "data",
-  ];
-
-  for (const attribute of attributes) {
-    for (const raw of extractAttributeUrls(
-      html,
-      attribute
-    )) {
-      const resolved =
-        resolveUrl(raw, pageUrl);
-
-      if (!resolved) {
-        continue;
-      }
-
-      if (isExternalNoise(resolved)) {
-        continue;
-      }
-
-      urls.add(resolved);
-    }
-  }
-
-  for (const raw of extractSrcsetUrls(html)) {
-    const resolved =
-      resolveUrl(raw, pageUrl);
-
-    if (!resolved) {
-      continue;
-    }
-
-    if (isExternalNoise(resolved)) {
-      continue;
-    }
-
-    urls.add(resolved);
-  }
-
-  /*
-   * Inline style="background-image: url(...)"
-   */
-  const styleRegex =
-    /\bstyle\s*=\s*["']([^"']+)["']/gi;
-
-  for (const match of html.matchAll(styleRegex)) {
-    const css = match[1];
-
-    const urlRegex =
-      /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi;
-
-    for (const cssMatch of css.matchAll(urlRegex)) {
-      const resolved =
-        resolveUrl(
-          cssMatch[2],
-          pageUrl
-        );
-
-      if (!resolved) {
-        continue;
-      }
-
-      if (isExternalNoise(resolved)) {
-        continue;
-      }
-
-      urls.add(resolved);
-    }
-  }
-
-  return urls;
-}
-
-/* -------------------------------------------------------------------------- */
-/* CSS                                                                         */
-/* -------------------------------------------------------------------------- */
-
-function extractCssUrls(
-  css: string,
-  cssUrl: string
-): string[] {
-  const urls: string[] = [];
-
-  const regex =
-    /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi;
-
-  for (const match of css.matchAll(regex)) {
-    const raw = match[2];
-
-    if (
-      raw.startsWith("data:") ||
-      raw.startsWith("#")
-    ) {
-      continue;
-    }
-
-    try {
-      const resolved =
-        normalizeUrl(
-          new URL(raw, cssUrl).href
-        );
-
-      if (!isExternalNoise(resolved)) {
-        urls.push(resolved);
-      }
-    } catch {
-      // Ignore malformed CSS URLs.
-    }
-  }
-
-  return urls;
-}
-
-function rewriteCss(
-  css: string,
-  cssUrl: string,
-  assetMap: Map<string, string>
 ): string {
-  return css.replace(
-    /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi,
-    (match, _quote, rawUrl) => {
+  return html.replace(
+    /\b(href|src|poster|action)=("([^"]*)"|'([^']*)')/gi,
+    (match, attribute, quoted, doubleValue, singleValue) => {
+      const rawValue = doubleValue ?? singleValue;
+
+      if (!rawValue) {
+        return match;
+      }
+
+      // Anchors
+      if (rawValue.startsWith("#")) {
+        return match;
+      }
+
+      // Non-HTTP protocols
       if (
-        rawUrl.startsWith("data:") ||
-        rawUrl.startsWith("#")
+        rawValue.startsWith("data:") ||
+        rawValue.startsWith("mailto:") ||
+        rawValue.startsWith("tel:") ||
+        rawValue.startsWith("javascript:") ||
+        rawValue.startsWith("blob:")
       ) {
         return match;
       }
 
       try {
-        const absolute =
-          normalizeUrl(
-            new URL(
-              rawUrl,
-              cssUrl
-            ).href
-          );
+        const absolute = new URL(rawValue, pageUrl);
 
-        const destination =
-          assetMap.get(absolute);
-
-        if (!destination) {
+        if (
+          absolute.protocol !== "http:" &&
+          absolute.protocol !== "https:"
+        ) {
           return match;
         }
 
-        const cssFile =
-          assetOutputPath(cssUrl);
+        const normalized = normalizeUrl(absolute.href);
 
-        const relative =
-          path
-            .relative(
-              path.dirname(cssFile),
-              destination
-            )
-            .split(path.sep)
-            .join("/");
+        // Internal documentation page
+        if (
+          absolute.origin === start.origin &&
+          inScope(normalized)
+        ) {
+          const local = localPageHref(
+            pageUrl,
+            normalized
+          );
+
+          return `${attribute}="${local}"`;
+        }
+
+        // Internal resource
+        if (absolute.origin === start.origin) {
+          const local = localResourceHref(
+            pageUrl,
+            normalized
+          );
+
+          return `${attribute}="${local}"`;
+        }
+
+        // External URL: preserve it.
+        return match;
+      } catch {
+        return match;
+      }
+    }
+  );
+}
+
+/**
+ * Rewrite CSS url(...) references.
+ *
+ * Example:
+ *
+ *   url("/_astro/foo.webp")
+ *
+ * becomes something like:
+ *
+ *   url("../_astro/foo.webp")
+ *
+ * depending on where the CSS file lives.
+ */
+function rewriteCss(
+  css: string,
+  cssUrl: string
+): string {
+  const cssOutput = resourceOutputPath(cssUrl);
+
+  return css.replace(
+    /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi,
+    (match, quote, rawUrl) => {
+      if (
+        rawUrl.startsWith("data:") ||
+        rawUrl.startsWith("#") ||
+        rawUrl.startsWith("blob:")
+      ) {
+        return match;
+      }
+
+      try {
+        const absolute = normalizeUrl(
+          new URL(rawUrl, cssUrl).href
+        );
+
+        const localFile = resourceOutputPath(
+          absolute
+        );
+
+        const relative = relativePath(
+          cssOutput,
+          localFile
+        );
 
         return `url("${relative}")`;
       } catch {
@@ -367,287 +398,64 @@ function rewriteCss(
   );
 }
 
-/* -------------------------------------------------------------------------- */
-/* HTML links                                                                  */
-/* -------------------------------------------------------------------------- */
+/**
+ * Download a resource with a fresh browser request.
+ *
+ * Using context.request rather than the page response listener
+ * makes phase 2 deterministic and independent of page timing.
+ */
+async function downloadResource(
+  context: Awaited<ReturnType<typeof browserContext>>,
+  url: string
+): Promise<Buffer | null> {
+  try {
+    const response = await context.request.get(url, {
+      timeout: 60_000,
+    });
 
-function discoverPageLinks(
-  html: string,
-  pageUrl: string
-): string[] {
-  const result: string[] = [];
+    if (!response.ok()) {
+      console.log(
+        `  ! ${response.status()} ${url}`
+      );
 
-  /*
-   * Only <a href=""> links are navigation links.
-   *
-   * Don't treat every href as a page.
-   */
-  const regex =
-    /<a\b[^>]*\bhref\s*=\s*["']([^"']+)["']/gi;
-
-  for (const match of html.matchAll(regex)) {
-    const raw = match[1];
-
-    const resolved =
-      resolveUrl(raw, pageUrl);
-
-    if (!resolved) {
-      continue;
+      return null;
     }
 
-    if (inScope(resolved)) {
-      result.push(resolved);
-    }
+    return await response.body();
+  } catch (error) {
+    console.log(`  ! failed ${url}`);
+
+    return null;
   }
-
-  return result;
 }
 
-/* -------------------------------------------------------------------------- */
-/* HTML rewriting                                                              */
-/* -------------------------------------------------------------------------- */
-
-function rewriteHtml(
-  html: string,
-  pageUrl: string,
-  pageMap: Map<string, string>,
-  assetMap: Map<string, string>
-): string {
-  /*
-   * Rewrite href/src/poster/data.
-   */
-  html = html.replace(
-    /\b(href|src|poster|data)\s*=\s*(["'])([^"']*)\2/gi,
-    (match, attribute, quote, raw) => {
-      /*
-       * Preserve anchors.
-       */
-      if (raw.startsWith("#")) {
-        return match;
-      }
-
-      /*
-       * Preserve external URLs.
-       */
-      if (
-        raw.startsWith("http://") ||
-        raw.startsWith("https://") ||
-        raw.startsWith("//")
-      ) {
-        /*
-         * But an absolute URL pointing at our
-         * documentation site is internal.
-         */
-        try {
-          const absolute =
-            normalizeUrl(
-              new URL(
-                raw,
-                pageUrl
-              ).href
-            );
-
-          if (
-            !inScope(absolute)
-          ) {
-            return match;
-          }
-
-          const pageDestination =
-            pageMap.get(absolute);
-
-          if (pageDestination) {
-            const relative =
-              path
-                .relative(
-                  path.dirname(
-                    pageOutputPath(pageUrl)
-                  ),
-                  pageDestination
-                )
-                .split(path.sep)
-                .join("/");
-
-            return `${attribute}=${quote}${relative}${quote}`;
-          }
-        } catch {
-          // Preserve malformed/external URL.
-        }
-
-        return match;
-      }
-
-      let absolute: string;
-
-      try {
-        absolute =
-          normalizeUrl(
-            new URL(
-              raw,
-              pageUrl
-            ).href
-          );
-      } catch {
-        return match;
-      }
-
-      /*
-       * Internal page.
-       */
-      const pageDestination =
-        pageMap.get(absolute);
-
-      if (pageDestination) {
-        const relative =
-          path
-            .relative(
-              path.dirname(
-                pageOutputPath(pageUrl)
-              ),
-              pageDestination
-            )
-            .split(path.sep)
-            .join("/");
-
-        return `${attribute}=${quote}${relative}${quote}`;
-      }
-
-      /*
-       * Asset.
-       */
-      const assetDestination =
-        assetMap.get(absolute);
-
-      if (assetDestination) {
-        const relative =
-          path
-            .relative(
-              path.dirname(
-                pageOutputPath(pageUrl)
-              ),
-              assetDestination
-            )
-            .split(path.sep)
-            .join("/");
-
-        return `${attribute}=${quote}${relative}${quote}`;
-      }
-
-      /*
-       * Unknown URL.
-       *
-       * Leave it alone rather than breaking it.
-       */
-      return match;
-    }
-  );
-
-  /*
-   * srcset.
-   */
-  html = html.replace(
-    /\bsrcset\s*=\s*(["'])([^"']*)\1/gi,
-    (match, quote, rawValue) => {
-      const rewritten =
-        rawValue
-          .split(",")
-          .map((item: string) => {
-            const parts =
-              item.trim().split(/\s+/);
-
-            if (!parts[0]) {
-              return item;
-            }
-
-            try {
-              const absolute =
-                normalizeUrl(
-                  new URL(
-                    parts[0],
-                    pageUrl
-                  ).href
-                );
-
-              const destination =
-                assetMap.get(absolute);
-
-              if (!destination) {
-                return item;
-              }
-
-              const relative =
-                path
-                  .relative(
-                    path.dirname(
-                      pageOutputPath(
-                        pageUrl
-                      )
-                    ),
-                    destination
-                  )
-                  .split(path.sep)
-                  .join("/");
-
-              parts[0] = relative;
-
-              return parts.join(" ");
-            } catch {
-              return item;
-            }
-          })
-          .join(", ");
-
-      return `srcset=${quote}${rewritten}${quote}`;
-    }
-  );
-
-  return html;
+/**
+ * Small helper solely to make the type of downloadResource readable.
+ */
+function browserContext(
+  browser: Awaited<ReturnType<typeof chromium.launch>>
+) {
+  return browser.newContext();
 }
 
-/* -------------------------------------------------------------------------- */
-/* Types                                                                       */
-/* -------------------------------------------------------------------------- */
+await fs.mkdir(outputDir, {
+  recursive: true,
+});
 
-type PageRecord = {
-  requestedUrl: string;
-  finalUrl: string;
-  html: string;
-  resourceUrls: string[];
-};
+const browser = await chromium.launch();
 
-/* -------------------------------------------------------------------------- */
-/* Main                                                                        */
-/* -------------------------------------------------------------------------- */
+const context = await browser.newContext({
+  serviceWorkers: "allow",
+});
 
-await fs.mkdir(
-  outputDir,
-  {
-    recursive: true,
-  }
-);
-
-const browser =
-  await chromium.launch();
-
-const page =
-  await browser.newPage();
+const page = await context.newPage();
 
 const queue: string[] = [
   normalizeUrl(start.href),
 ];
 
-const queued =
-  new Set(queue);
-
-const pages =
-  new Map<string, PageRecord>();
-
-const allResourceUrls =
-  new Set<string>();
-
-/* ========================================================================== */
-/* PHASE 1                                                                     */
-/* ========================================================================== */
+const queued = new Set(queue);
+const visited = new Set<string>();
 
 console.log("=== PHASE 1: CRAWL ===");
 
@@ -655,43 +463,31 @@ while (
   queue.length > 0 &&
   pages.size < maxPages
 ) {
-  const requestedUrl =
-    queue.shift()!;
+  const requestedUrl = queue.shift()!;
 
-  if (pages.has(requestedUrl)) {
+  if (visited.has(requestedUrl)) {
     continue;
   }
 
-  console.log(
-    `→ ${requestedUrl}`
-  );
+  console.log(`→ ${requestedUrl}`);
 
   try {
-    const response =
-      await page.goto(
-        requestedUrl,
-        {
-          waitUntil: "networkidle",
-          timeout: 60_000,
-        }
-      );
+    const response = await page.goto(
+      requestedUrl,
+      {
+        waitUntil: "networkidle",
+        timeout: 60_000,
+      }
+    );
 
     if (!response) {
-      console.log(
-        "  no response"
-      );
+      console.log("  no response");
       continue;
     }
 
-    const finalUrl =
-      normalizeUrl(
-        page.url()
-      );
+    const finalUrl = normalizeUrl(page.url());
 
-    if (
-      finalUrl !==
-      requestedUrl
-    ) {
+    if (finalUrl !== requestedUrl) {
       console.log(
         `  redirect → ${finalUrl}`
       );
@@ -711,78 +507,81 @@ while (
       continue;
     }
 
-    /*
-     * Give lazy-loaded content a moment.
-     */
-    await page.waitForTimeout(500);
+    // Give lazy-loaded content/assets a chance to appear.
+    await page.waitForTimeout(1000);
 
-    /*
-     * Get the complete rendered HTML.
-     */
-    const html =
-      await page.content();
+    const html = await page.content();
 
-    /*
-     * Discover resources from HTML.
-     */
     const resourceUrls =
-      discoverResourceUrls(
-        html,
-        finalUrl
-      );
+      await collectResourceUrls(page);
 
     for (const url of resourceUrls) {
-      allResourceUrls.add(url);
-    }
-
-    /*
-     * Discover internal documentation pages.
-     */
-    const links =
-      discoverPageLinks(
-        html,
-        finalUrl
-      );
-
-    let discovered = 0;
-
-    for (const url of links) {
-      if (
-        !queued.has(url) &&
-        !pages.has(url)
-      ) {
-        queue.push(url);
-        queued.add(url);
-        discovered++;
+      if (!isExternalNoise(url)) {
+        resources.add(url);
       }
     }
 
-    const record: PageRecord = {
-      requestedUrl,
-      finalUrl,
+    pages.set(finalUrl, {
+      url: finalUrl,
       html,
-      resourceUrls: [
-        ...resourceUrls,
-      ],
-    };
+      resourceUrls,
+    });
 
-    pages.set(
-      finalUrl,
-      record
-    );
-
-    /*
-     * Also map the requested URL to the same
-     * final page, which is useful for redirects.
-     */
-    pages.set(
-      requestedUrl,
-      record
-    );
+    visited.add(requestedUrl);
+    visited.add(finalUrl);
 
     console.log(
       `  captured ${resourceUrls.length} page resources`
     );
+
+    // Discover internal documentation links.
+    const links = await page.locator(
+      "a[href]"
+    ).evaluateAll(
+      (anchors) =>
+        anchors
+          .map(
+            (a) =>
+              (a as HTMLAnchorElement).href
+          )
+          .filter(Boolean)
+    );
+
+    let discovered = 0;
+
+    for (const href of links) {
+      try {
+        const url = new URL(
+          href,
+          finalUrl
+        );
+
+        if (
+          url.protocol !== "http:" &&
+          url.protocol !== "https:"
+        ) {
+          continue;
+        }
+
+        if (!inScope(url.href)) {
+          continue;
+        }
+
+        const normalized =
+          normalizeUrl(url.href);
+
+        if (
+          !visited.has(normalized) &&
+          !queued.has(normalized)
+        ) {
+          queue.push(normalized);
+          queued.add(normalized);
+          discovered++;
+        }
+      } catch {
+        // Ignore malformed links.
+      }
+    }
 
     console.log(
       `  discovered ${discovered} new pages`
@@ -798,268 +597,18 @@ console.log();
 console.log(
   `Phase 1 complete: ${pages.size} page URLs`
 );
-
 console.log(
-  `Resources discovered: ${allResourceUrls.size}`
+  `Resources discovered: ${resources.size}`
 );
-
-/* ========================================================================== */
-/* PAGE MAP                                                                     */
-/* ========================================================================== */
-
-const pageMap =
-  new Map<string, string>();
-
-for (const [url, record] of pages) {
-  pageMap.set(
-    url,
-    pageOutputPath(
-      record.finalUrl
-    )
-  );
-}
-
-/* ========================================================================== */
-/* PHASE 2                                                                     */
-/* ========================================================================== */
 
 console.log();
-console.log(
-  "=== PHASE 2: DOWNLOAD RESOURCES ==="
-);
+console.log("=== PHASE 2: DOWNLOAD RESOURCES ===");
 
-const assetMap =
-  new Map<string, string>();
+let downloaded = 0;
 
-const processedResources =
-  new Set<string>();
-
-/*
- * We process this as a queue because CSS can introduce
- * additional resources through url(...).
- */
-const resourceQueue =
-  [...allResourceUrls];
-
-while (
-  resourceQueue.length > 0
-) {
-  const url =
-    resourceQueue.shift()!;
-
-  if (
-    processedResources.has(url)
-  ) {
-    continue;
-  }
-
-  processedResources.add(url);
-
-  /*
-   * Internal documentation pages are not assets.
-   */
-  if (
-    inScope(url)
-  ) {
-    console.log(
-      `  skipping page URL ${url}`
-    );
-    continue;
-  }
-
-  if (
-    isExternalNoise(url)
-  ) {
-    continue;
-  }
-
+for (const resourceUrl of resources) {
   const destination =
-    assetOutputPath(url);
-
-  try {
-    console.log(
-      `→ ${url}`
-    );
-
-    const response =
-      await page.request.get(
-        url,
-        {
-          timeout: 60_000,
-        }
-      );
-
-    if (!response.ok()) {
-      console.log(
-        `  HTTP ${response.status()}, skipping`
-      );
-      continue;
-    }
-
-    const body =
-      await response.body();
-
-    const contentType =
-      response
-        .headers()
-        ["content-type"] ?? "";
-
-    await fs.mkdir(
-      path.dirname(destination),
-      {
-        recursive: true,
-      }
-    );
-
-    await fs.writeFile(
-      destination,
-      body
-    );
-
-    assetMap.set(
-      url,
-      destination
-    );
-
-    console.log(
-      `  saved ${destination}`
-    );
-
-    /*
-     * CSS may reference fonts/images/etc.
-     */
-    if (
-      contentType.includes(
-        "text/css"
-      ) ||
-      url.endsWith(".css")
-    ) {
-      const css =
-        body.toString("utf8");
-
-      const cssDependencies =
-        extractCssUrls(
-          css,
-          url
-        );
-
-      for (
-        const dependency
-        of cssDependencies
-      ) {
-        if (
-          !processedResources.has(
-            dependency
-          )
-        ) {
-          resourceQueue.push(
-            dependency
-          );
-        }
-      }
-    }
-  } catch (error) {
-    console.error(
-      `  ERROR: ${error}`
-    );
-  }
-}
-
-console.log();
-console.log(
-  `Downloaded ${assetMap.size} resources`
-);
-
-/* ========================================================================== */
-/* REWRITE CSS                                                                 */
-/* ========================================================================== */
-
-console.log();
-console.log(
-  "=== REWRITE CSS ==="
-);
-
-for (
-  const [url, destination]
-  of assetMap
-) {
-  if (
-    !url.toLowerCase().endsWith(
-      ".css"
-    )
-  ) {
-    continue;
-  }
-
-  try {
-    let css =
-      await fs.readFile(
-        destination,
-        "utf8"
-      );
-
-    css =
-      rewriteCss(
-        css,
-        url,
-        assetMap
-      );
-
-    await fs.writeFile(
-      destination,
-      css
-    );
-
-    console.log(
-      `→ ${url}`
-    );
-  } catch (error) {
-    console.error(
-      `  ERROR rewriting ${url}:`,
-      error
-    );
-  }
-}
-
-/* ========================================================================== */
-/* WRITE HTML                                                                  */
-/* ========================================================================== */
-
-console.log();
-console.log(
-  "=== WRITE HTML ==="
-);
-
-const written =
-  new Set<string>();
-
-for (
-  const record
-  of pages.values()
-) {
-  const finalUrl =
-    record.finalUrl;
-
-  if (
-    written.has(finalUrl)
-  ) {
-    continue;
-  }
-
-  written.add(finalUrl);
-
-  const destination =
-    pageOutputPath(
-      finalUrl
-    );
-
-  const html =
-    rewriteHtml(
-      record.html,
-      finalUrl,
-      pageMap,
-      assetMap
-    );
+    resourceOutputPath(resourceUrl);
 
   await fs.mkdir(
     path.dirname(destination),
@@ -1068,46 +617,134 @@ for (
     }
   );
 
-  await fs.writeFile(
-    destination,
-    html
-  );
+  try {
+    const response =
+      await context.request.get(
+        resourceUrl,
+        {
+          timeout: 60_000,
+        }
+      );
 
-  console.log(
-    `→ ${destination}`
-  );
+    if (!response.ok()) {
+      console.log(
+        `! ${response.status()} ${resourceUrl}`
+      );
+      continue;
+    }
+
+    const body =
+      await response.body();
+
+    await fs.writeFile(
+      destination,
+      body
+    );
+
+    downloaded++;
+
+    console.log(
+      `✓ ${resourceUrl}`
+    );
+  } catch (error) {
+    console.log(
+      `! failed ${resourceUrl}`
+    );
+  }
 }
-
-/* ========================================================================== */
-/* DONE                                                                        */
-/* ========================================================================== */
-
-await browser.close();
 
 console.log();
 console.log(
-  "================================"
+  `Downloaded ${downloaded} resources`
+);
+
+console.log();
+console.log("=== REWRITE CSS ===");
+
+/**
+ * Rewrite every downloaded CSS file.
+ *
+ * We don't need to know which page referenced it.
+ * CSS URLs are resolved relative to the CSS file itself.
+ */
+for (const resourceUrl of resources) {
+  if (!resourceUrl.match(/\.css(?:$|\?)/i)) {
+    continue;
+  }
+
+  const destination =
+    resourceOutputPath(resourceUrl);
+
+  try {
+    const css =
+      await fs.readFile(
+        destination,
+        "utf8"
+      );
+
+    const rewritten =
+      rewriteCss(
+        css,
+        resourceUrl
+      );
+
+    await fs.writeFile(
+      destination,
+      rewritten
+    );
+
+    console.log(
+      `✓ ${resourceUrl}`
+    );
+  } catch {
+    // Resource may not have downloaded.
+  }
+}
+
+console.log();
+console.log("=== WRITE HTML ===");
+
+for (const record of pages.values()) {
+  const destination =
+    pageOutputPath(record.url);
+
+  await fs.mkdir(
+    path.dirname(destination),
+    {
+      recursive: true,
+    }
+  );
+
+  const rewritten =
+    rewriteHtml(
+      record.html,
+      record.url
+    );
+
+  await fs.writeFile(
+    destination,
+    rewritten,
+    "utf8"
+  );
+
+  console.log(
+    `✓ ${record.url}`
+  );
+}
+
+await context.close();
+await browser.close();
+
+console.log();
+console.log("================================");
+console.log("DONE");
+console.log("================================");
+console.log(
+  `Pages:     ${pages.size}`
 );
 console.log(
-  "DONE"
-);
-console.log(
-  "================================"
-);
-console.log(
-  `Pages:     ${written.size}`
-);
-console.log(
-  `Resources: ${assetMap.size}`
+  `Resources: ${downloaded}`
 );
 console.log(
   `Output:    ${path.resolve(outputDir)}`
 );
-
-if (
-  written.size >= maxPages
-) {
-  console.log(
-    `Stopped at MAX_PAGES=${maxPages}`
-  );
-}
