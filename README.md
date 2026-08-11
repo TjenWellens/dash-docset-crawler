@@ -73,7 +73,7 @@ INSERT INTO searchIndex (name, type, path)
 VALUES (
     'Drizzle ORM',
     'Guide',
-    'orm.drizzle.team/docs/overview.html'
+    'pages/orm.drizzle.team/docs/overview.html'
 );
 SQL
 ```
