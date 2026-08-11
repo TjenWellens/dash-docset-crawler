@@ -2,10 +2,9 @@ import { chromium } from "playwright";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-const maxPages = Number(process.env.MAX_PAGES ?? 500);
-
 const startUrl = process.argv[2];
 const outputDir = process.argv[3] ?? "./output";
+const maxPages = Number(process.env.MAX_PAGES ?? 500);
 
 if (!startUrl) {
   console.error("Usage: npx tsx crawl.ts <url> [output-dir]");
@@ -13,8 +12,6 @@ if (!startUrl) {
 }
 
 const start = new URL(startUrl);
-
-// Normalize the starting URL.
 start.hash = "";
 start.search = "";
 
@@ -25,13 +22,9 @@ const scopePath = start.pathname.endsWith("/")
 function normalizeUrl(raw: string): string {
   const url = new URL(raw);
 
-  // Fragments don't identify separate documents.
   url.hash = "";
-
-  // Query parameters often create duplicate pages in docs sites.
   url.search = "";
 
-  // Normalize trailing slash.
   if (url.pathname !== "/" && url.pathname.endsWith("/")) {
     url.pathname = url.pathname.slice(0, -1);
   }
@@ -44,12 +37,14 @@ function inScope(raw: string): boolean {
 
   return (
     url.origin === start.origin &&
-    (url.pathname === start.pathname ||
-      url.pathname.startsWith(scopePath))
+    (
+      url.pathname === start.pathname ||
+      url.pathname.startsWith(scopePath)
+    )
   );
 }
 
-function outputPath(raw: string): string {
+function pageOutputPath(raw: string): string {
   const url = new URL(raw);
 
   let pathname = url.pathname;
@@ -66,9 +61,23 @@ function outputPath(raw: string): string {
     }
   }
 
+  return path.join(outputDir, url.hostname, pathname);
+}
+
+function assetOutputPath(raw: string): string {
+  const url = new URL(raw);
+
+  // Keep the URL's original path.
+  let pathname = url.pathname.replace(/^\/+/, "");
+
+  if (!pathname) {
+    pathname = "index";
+  }
+
   return path.join(
     outputDir,
     url.hostname,
+    "_assets",
     pathname
   );
 }
@@ -76,7 +85,6 @@ function outputPath(raw: string): string {
 await fs.mkdir(outputDir, { recursive: true });
 
 const browser = await chromium.launch();
-
 const page = await browser.newPage();
 
 const queue: string[] = [normalizeUrl(start.href)];
@@ -92,6 +100,44 @@ while (queue.length > 0 && visited.size < maxPages) {
 
   console.log(`→ ${requestedUrl}`);
 
+  // Resources loaded by this page.
+  const resources = new Map<string, Buffer>();
+
+  const responseHandler = async (response: any) => {
+    try {
+      const url = response.url();
+
+      // Only capture HTTP(S) resources.
+      if (!url.startsWith("http://") && !url.startsWith("https://")) {
+        return;
+      }
+
+      const contentType =
+        response.headers()["content-type"] ?? "";
+
+      // Capture things that are useful offline.
+      const interesting =
+        contentType.includes("text/css") ||
+        contentType.includes("javascript") ||
+        contentType.includes("font/") ||
+        contentType.includes("image/") ||
+        contentType.includes("application/font") ||
+        contentType.includes("application/octet-stream");
+
+      if (!interesting) {
+        return;
+      }
+
+      const body = await response.body();
+
+      resources.set(normalizeUrl(url), body);
+    } catch {
+      // Some responses cannot have their body read.
+    }
+  };
+
+  page.on("response", responseHandler);
+
   try {
     const response = await page.goto(requestedUrl, {
       waitUntil: "networkidle",
@@ -100,37 +146,83 @@ while (queue.length > 0 && visited.size < maxPages) {
 
     if (!response) {
       console.log("  no response");
+      page.off("response", responseHandler);
       continue;
     }
 
-    // IMPORTANT:
-    // page.url() is the URL after redirects.
     const finalUrl = normalizeUrl(page.url());
 
     if (finalUrl !== requestedUrl) {
       console.log(`  redirect → ${finalUrl}`);
     }
 
-    // Don't save pages that redirected outside our scope.
     if (!inScope(finalUrl)) {
-      console.log(`  outside scope, skipping`);
+      console.log("  outside scope, skipping");
+      page.off("response", responseHandler);
       continue;
     }
 
     if (!response.ok()) {
       console.log(`  HTTP ${response.status()}, skipping`);
+      page.off("response", responseHandler);
       continue;
     }
+
+    await page.waitForTimeout(500);
+
+    // Wait a moment for late resources.
+    await page.waitForTimeout(500);
 
     visited.add(requestedUrl);
     visited.add(finalUrl);
 
-    // Give client-side navigation/rendering a little time.
-    await page.waitForTimeout(500);
+    console.log(`  captured ${resources.size} resources`);
 
-    const html = await page.content();
+    // Save resources.
+    const assetMap = new Map<string, string>();
 
-    const destination = outputPath(finalUrl);
+    for (const [url, body] of resources) {
+      const destination = assetOutputPath(url);
+
+      await fs.mkdir(path.dirname(destination), {
+        recursive: true,
+      });
+
+      await fs.writeFile(destination, body);
+
+      assetMap.set(url, destination);
+
+      console.log(`  asset ${url}`);
+    }
+
+    // Get rendered HTML.
+    let html = await page.content();
+
+    // Rewrite captured resource URLs.
+    for (const [url, destination] of assetMap) {
+      const pagePath = pageOutputPath(finalUrl);
+
+      let relative = path.relative(
+        path.dirname(pagePath),
+        destination
+      );
+
+      relative = relative.split(path.sep).join("/");
+
+      // Replace both absolute URLs and paths.
+      const parsed = new URL(url);
+
+      const replacements = [
+        url,
+        parsed.pathname,
+      ];
+
+      for (const original of replacements) {
+        html = html.split(original).join(relative);
+      }
+    }
+
+    const destination = pageOutputPath(finalUrl);
 
     await fs.mkdir(path.dirname(destination), {
       recursive: true,
@@ -140,6 +232,7 @@ while (queue.length > 0 && visited.size < maxPages) {
 
     console.log(`  saved ${destination}`);
 
+    // Discover navigation links.
     const links = await page.locator("a[href]").evaluateAll(
       (anchors) =>
         anchors
@@ -171,6 +264,8 @@ while (queue.length > 0 && visited.size < maxPages) {
   } catch (error) {
     console.error(`  ERROR: ${error}`);
   }
+
+  page.off("response", responseHandler);
 }
 
 await browser.close();
