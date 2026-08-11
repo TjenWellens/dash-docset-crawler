@@ -572,180 +572,224 @@ console.log(
   "=== CREATE INDEX ===",
 );
 
-const db =
-  new Database(
-    indexPath,
-  );
-
-/*
- * Dash's standard docset search index.
- */
-db.exec(`
-CREATE TABLE searchIndex (
-  id INTEGER PRIMARY KEY,
-  name TEXT,
-  type TEXT,
-  path TEXT
-);
-
-CREATE UNIQUE INDEX anchor
-ON searchIndex (name, type, path);
-`);
-
-/*
- * Use a prepared statement instead of
- * manually constructing SQL.
- */
-const insert =
-  db.prepare(`
-INSERT OR IGNORE INTO searchIndex
-(name, type, path)
-VALUES
-(?, ?, ?)
-  `);
-
-const insertMany =
-  db.transaction(
-    (
-      entries: Array<{
-        name: string;
-        type: string;
-        path: string;
-      }>,
-    ) => {
-      for (
-        const entry of entries
-      ) {
-        insert.run(
-          entry.name,
-          entry.type,
-          entry.path,
-        );
-      }
-    },
-  );
-
-const indexEntries: Array<{
-  name: string;
-  type: string;
-  path: string;
-}> = [];
-
-/*
- * ============================================================
- * INDEX PAGES
- * ============================================================
- */
-
 let pageIndexCount = 0;
 let headingIndexCount = 0;
 
-for (
-  const [
-    pageUrl,
-    page,
-  ] of Object.entries(
-    manifest.pages,
-  )
-) {
-  if (
-    page.status !==
-    "localized"
-  ) {
-    continue;
-  }
+try {
+  console.log(
+    `  Database: ${indexPath}`,
+  );
 
-  const pagePath =
-    documentsPath(
-      page.path,
+  const db =
+    new Database(
+      indexPath,
     );
 
-  const source =
-    path.join(
-      localDir,
-      page.path,
+  console.log(
+    "  SQLite database opened",
+  );
+
+  db.exec(`
+    CREATE TABLE searchIndex (
+      id INTEGER PRIMARY KEY,
+      name TEXT,
+      type TEXT,
+      path TEXT
+    );
+  `);
+
+  console.log(
+    "  searchIndex table created",
+  );
+
+  db.exec(`
+    CREATE UNIQUE INDEX anchor
+      ON searchIndex (name, type, path);
+  `);
+
+  console.log(
+    "  searchIndex index created",
+  );
+
+  const insert =
+    db.prepare(`
+      INSERT OR IGNORE INTO searchIndex
+        (name, type, path)
+      VALUES
+        (?, ?, ?)
+    `);
+
+  const insertMany =
+    db.transaction(
+      (
+        entries: Array<{
+          name: string;
+          type: string;
+          path: string;
+        }>,
+      ) => {
+        for (
+          const entry of entries
+          ) {
+          insert.run(
+            entry.name,
+            entry.type,
+            entry.path,
+          );
+        }
+      },
     );
 
-  let html: string;
-
-  try {
-    html =
-      await fs.readFile(
-        source,
-        "utf8",
-      );
-  } catch {
-    console.warn(
-      `  WARNING: Could not read ${page.path}`,
-    );
-
-    continue;
-  }
+  const indexEntries: Array<{
+    name: string;
+    type: string;
+    path: string;
+  }> = [];
 
   /*
    * ----------------------------------------------------------
-   * PAGE TITLE
+   * INDEX PAGES
    * ----------------------------------------------------------
    */
-
-  const title =
-    extractTitle(
-      html,
-    ) ??
-    pageUrl;
-
-  indexEntries.push({
-    name: title,
-    type: pageType(pageUrl),
-    path: pagePath,
-  });
-
-  pageIndexCount++;
-
-  /*
-   * ----------------------------------------------------------
-   * HEADINGS
-   * ----------------------------------------------------------
-   */
-
-  const headings =
-    extractHeadings(
-      html,
-    );
 
   for (
-    const heading of headings
-  ) {
+    const [
+      pageUrl,
+      page,
+    ] of Object.entries(
+    manifest.pages,
+  )
+    ) {
+    if (
+      page.status !==
+      "localized"
+    ) {
+      continue;
+    }
+
+    const pagePath =
+      documentsPath(
+        page.path,
+      );
+
+    const source =
+      path.join(
+        localDir,
+        page.path,
+      );
+
+    let html: string;
+
+    try {
+      html =
+        await fs.readFile(
+          source,
+          "utf8",
+        );
+    } catch (error) {
+      console.warn(
+        `  WARNING: Could not read ${page.path}`,
+      );
+
+      console.warn(
+        `    ${error}`,
+      );
+
+      continue;
+    }
+
+    /*
+     * Page title.
+     */
+    const title =
+      extractTitle(
+        html,
+      ) ??
+      pageUrl;
+
     indexEntries.push({
-      name: heading.name,
-      type: headingType(
-        heading.level,
+      name: title,
+      type: pageType(
+        pageUrl,
       ),
-      path:
-        `${pagePath}#${heading.id}`,
+      path: pagePath,
     });
 
-    headingIndexCount++;
+    pageIndexCount++;
+
+    /*
+     * Headings.
+     */
+    const headings =
+      extractHeadings(
+        html,
+      );
+
+    for (
+      const heading of headings
+      ) {
+      indexEntries.push({
+        name: heading.name,
+        type: headingType(
+          heading.level,
+        ),
+        path:
+          `${pagePath}#${heading.id}`,
+      });
+
+      headingIndexCount++;
+    }
   }
+
+  console.log(
+    `  Pages found:       ${pageIndexCount}`,
+  );
+
+  console.log(
+    `  Headings found:    ${headingIndexCount}`,
+  );
+
+  console.log(
+    `  Entries to insert: ${indexEntries.length}`,
+  );
+
+  insertMany(
+    indexEntries,
+  );
+
+  console.log(
+    "  Entries inserted",
+  );
+
+  const row =
+    db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM searchIndex",
+      )
+      .get() as {
+      count: number;
+    };
+
+  console.log(
+    `  SQLite rows:       ${row.count}`,
+  );
+
+  db.close();
+
+  console.log(
+    "  SQLite database closed",
+  );
+} catch (error) {
+  console.error();
+  console.error(
+    "ERROR: Failed to create Dash SQLite index.",
+  );
+  console.error();
+
+  console.error(error);
+
+  process.exit(1);
 }
-
-insertMany(
-  indexEntries,
-);
-
-db.close();
-
-console.log(
-  `  Pages indexed:    ${pageIndexCount}`,
-);
-
-console.log(
-  `  Headings indexed: ${headingIndexCount}`,
-);
-
-console.log(
-  `  Total entries:    ${indexEntries.length}`,
-);
 
 console.log();
 
