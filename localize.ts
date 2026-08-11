@@ -1,47 +1,93 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-type ManifestResource = {
-  url: string;
-  contentType?: string;
-};
-
-type ManifestPage = {
-  url: string;
-  path: string;
-};
-
-type Manifest = {
-  pages?: ManifestPage[];
-  resources?: ManifestResource[];
-};
-
 const rawDir = process.argv[2];
-const outputDir = process.argv[3];
 
-if (!rawDir || !outputDir) {
+if (!rawDir) {
   console.error(
-    "Usage: npx tsx localize.ts <raw-dir> <output-dir>",
+    "Usage: npx tsx localize.ts <raw-dir> [localized-dir]",
   );
   process.exit(1);
 }
 
+const localizedDir =
+  process.argv[3] ??
+  rawDir.replace(/\/raw$/, "/localized");
+
 const manifestPath =
   path.join(rawDir, "manifest.json");
 
-const manifest: Manifest =
-  JSON.parse(
-    await fs.readFile(
-      manifestPath,
-      "utf8",
-    ),
+type ManifestPage = {
+  path: string;
+  status: string;
+  scrapedAt?: string;
+};
+
+type ManifestResource = {
+  path: string;
+  status: string;
+  contentType?: string;
+  downloadedAt?: string;
+};
+
+type Manifest = {
+  version: number;
+
+  site: {
+    name: string;
+    startUrl: string;
+  };
+
+  scope: {
+    origin: string;
+    path: string;
+  };
+
+  scrape: {
+    startedAt: string;
+    lastUpdatedAt: string;
+    completedAt: string | null;
+    complete: boolean;
+  };
+
+  pages: Record<string, ManifestPage>;
+
+  resources?: Record<string, ManifestResource>;
+};
+
+const manifestText =
+  await fs.readFile(
+    manifestPath,
+    "utf8",
   );
 
-const pages =
-  manifest.pages ?? [];
+const manifest =
+  JSON.parse(manifestText) as Manifest;
 
-const resources =
-  manifest.resources ?? [];
+const origin =
+  manifest.scope.origin;
+
+const scopePath =
+  manifest.scope.path.endsWith("/")
+    ? manifest.scope.path
+    : manifest.scope.path + "/";
+
+console.log("=== LOCALIZE ===");
+console.log(`Raw:       ${path.resolve(rawDir)}`);
+console.log(`Localized: ${path.resolve(localizedDir)}`);
+console.log();
+
+if (!manifest.resources) {
+  console.log(
+    "Warning: manifest has no resources section.",
+  );
+}
+
+/*
+ * ============================================================
+ * HELPERS
+ * ============================================================
+ */
 
 function normalizeUrl(raw: string): string {
   const url = new URL(raw);
@@ -60,108 +106,47 @@ function normalizeUrl(raw: string): string {
   return url.href;
 }
 
-function pageOutputPath(
-  urlString: string,
-): string {
-  const url =
-    new URL(urlString);
+function inScope(raw: string): boolean {
+  const url = new URL(raw);
 
-  let pathname =
-    url.pathname;
-
-  if (
-    pathname === "/" ||
-    pathname === ""
-  ) {
-    pathname = "index.html";
-  } else {
-    pathname =
-      pathname.replace(/^\/+/, "");
-
-    if (
-      pathname.endsWith("/")
-    ) {
-      pathname +=
-        "index.html";
-    } else {
-      pathname +=
-        ".html";
-    }
-  }
-
-  return path.join(
-    outputDir,
-    "pages",
-    url.hostname,
-    pathname,
-  );
-}
-
-function rawPagePath(
-  page: ManifestPage,
-): string {
-  return path.join(
-    rawDir,
-    page.path,
-  );
-}
-
-function rawResourcePath(
-  resourceUrl: string,
-): string {
-  const url =
-    new URL(resourceUrl);
-
-  let pathname =
-    url.pathname.replace(
-      /^\/+/,
-      "",
-    );
-
-  if (!pathname) {
-    pathname = "index";
-  }
-
-  return path.join(
-    rawDir,
-    "resources",
-    url.hostname,
-    pathname,
+  return (
+    url.origin === origin &&
+    (
+      url.pathname === scopePath.slice(0, -1) ||
+      url.pathname.startsWith(scopePath)
+    )
   );
 }
 
 /**
- * Decide whether a resource should have
- * an extension added.
- *
- * Most importantly:
- *
- *   text/css + no .css
- *     -> .css
+ * Turn a manifest-relative page path into
+ * an absolute path inside rawDir.
  */
-function localizedResourcePath(
-  rawPath: string,
-  contentType: string,
-): string {
-  const type =
-    contentType
-      .split(";", 1)[0]
-      .trim()
-      .toLowerCase();
-
-  if (
-    type === "text/css" &&
-    !rawPath
-      .toLowerCase()
-      .endsWith(".css")
-  ) {
-    return `${rawPath}.css`;
-  }
-
-  return rawPath;
+function rawPath(relativePath: string): string {
+  return path.join(
+    rawDir,
+    relativePath,
+  );
 }
 
-function relativePath(
+/**
+ * Turn a manifest-relative page path into
+ * the corresponding path inside localizedDir.
+ */
+function localizedPath(
+  relativePath: string,
+): string {
+  return path.join(
+    localizedDir,
+    relativePath,
+  );
+}
+
+/**
+ * Calculate a relative URL from one local file
+ * to another.
+ */
+function relativeLocalPath(
   fromFile: string,
   toFile: string,
 ): string {
@@ -175,59 +160,127 @@ function relativePath(
 }
 
 /**
- * Build page URL -> local path.
+ * Determine whether a resource path has
+ * a recognizable file extension.
  */
-const pageMap =
-  new Map<string, string>();
+function hasExtension(
+  filePath: string,
+): boolean {
+  const basename =
+    path.basename(filePath);
 
-for (const page of pages) {
-  pageMap.set(
-    normalizeUrl(page.url),
-    pageOutputPath(page.url),
+  return /\.[^./]+$/.test(
+    basename,
   );
 }
 
 /**
- * Build resource URL -> local path.
+ * If a CSS resource has no extension,
+ * localize it as .css.
  *
- * This is where extensionless CSS becomes
- * extensionful CSS.
+ * Example:
+ *
+ *   resources/.../@docsearch/css@3
+ *
+ * becomes:
+ *
+ *   resources/.../@docsearch/css@3.css
+ */
+function localizedResourcePath(
+  resource: ManifestResource,
+): string {
+  let relativePath =
+    resource.path;
+
+  const contentType =
+    resource.contentType ?? "";
+
+  if (
+    contentType.includes("text/css") &&
+    !hasExtension(relativePath)
+  ) {
+    relativePath += ".css";
+  }
+
+  return path.join(
+    localizedDir,
+    relativePath,
+  );
+}
+
+/**
+ * Build a lookup of normalized resource URL
+ * -> localized filesystem path.
  */
 const resourceMap =
   new Map<string, string>();
 
-for (const resource of resources) {
-  const normalized =
-    normalizeUrl(resource.url);
+if (manifest.resources) {
+  for (
+    const [resourceUrl, resource]
+    of Object.entries(
+      manifest.resources,
+    )
+  ) {
+    if (
+      resource.status !== "downloaded"
+    ) {
+      continue;
+    }
 
-  const rawPath =
-    rawResourcePath(
-      resource.url,
+    const normalized =
+      normalizeUrl(resourceUrl);
+
+    resourceMap.set(
+      normalized,
+      localizedResourcePath(resource),
     );
+  }
+}
 
-  const localPath =
-    localizedResourcePath(
-      rawPath,
-      resource.contentType ?? "",
-    );
+/**
+ * Build a lookup of normalized page URL
+ * -> localized filesystem path.
+ *
+ * Only downloaded pages are included.
+ */
+const pageMap =
+  new Map<string, string>();
 
-  resourceMap.set(
-    normalized,
-    localPath,
+for (
+  const [pageUrl, page]
+  of Object.entries(
+    manifest.pages,
+  )
+) {
+  if (
+    page.status !== "downloaded"
+  ) {
+    continue;
+  }
+
+  pageMap.set(
+    normalizeUrl(pageUrl),
+    localizedPath(page.path),
   );
 }
 
-console.log("=== LOCALIZE ===");
 console.log(
-  `Pages:     ${pageMap.size}`,
-);
-console.log(
-  `Resources: ${resourceMap.size}`,
+  `Downloaded pages:     ${pageMap.size}`,
 );
 
-/**
- * Rewrite url(...) references inside CSS.
+console.log(
+  `Downloaded resources: ${resourceMap.size}`,
+);
+
+console.log();
+
+/*
+ * ============================================================
+ * REWRITE CSS
+ * ============================================================
  */
+
 function rewriteCss(
   css: string,
   cssUrl: string,
@@ -246,60 +299,127 @@ function rewriteCss(
         return match;
       }
 
+      let absolute: URL;
+
       try {
-        const absolute =
-          normalizeUrl(
-            new URL(
-              rawUrl,
-              cssUrl,
-            ).href,
+        absolute =
+          new URL(
+            rawUrl,
+            cssUrl,
           );
-
-        const destination =
-          resourceMap.get(
-            absolute,
-          );
-
-        if (!destination) {
-          return match;
-        }
-
-        /*
-         * CSS files themselves may have had
-         * ".css" appended during localization,
-         * so calculate the relative path from
-         * the localized CSS file.
-         */
-        const cssLocalPath =
-          resourceMap.get(
-            normalizeUrl(cssUrl),
-          );
-
-        if (!cssLocalPath) {
-          return match;
-        }
-
-        const relative =
-          relativePath(
-            cssLocalPath,
-            destination,
-          );
-
-        return `url("${relative}")`;
       } catch {
         return match;
       }
+
+      if (
+        absolute.protocol !== "http:" &&
+        absolute.protocol !== "https:"
+      ) {
+        return match;
+      }
+
+      const normalized =
+        normalizeUrl(
+          absolute.href,
+        );
+
+      const destination =
+        resourceMap.get(
+          normalized,
+        );
+
+      if (!destination) {
+        /*
+         * Resource wasn't downloaded.
+         *
+         * Keep the original CSS reference.
+         */
+        return match;
+      }
+
+      /*
+       * We need the localized CSS file's
+       * location as the source of the
+       * relative path.
+       */
+      const source =
+        localizedCssSourcePath(
+          cssUrl,
+        );
+
+      const relative =
+        relativeLocalPath(
+          source,
+          destination,
+        );
+
+      return `url("${relative}")`;
     },
   );
 }
 
 /**
- * Rewrite HTML attributes.
+ * Find where a CSS resource lives in
+ * localizedDir.
  */
+function localizedCssSourcePath(
+  cssUrl: string,
+): string {
+  const normalized =
+    normalizeUrl(cssUrl);
+
+  const destination =
+    resourceMap.get(
+      normalized,
+    );
+
+  if (destination) {
+    return destination;
+  }
+
+  /*
+   * This should normally never happen,
+   * but gives us a deterministic fallback.
+   */
+  const resource =
+    manifest.resources?.[normalized];
+
+  if (resource) {
+    return localizedResourcePath(
+      resource,
+    );
+  }
+
+  return path.join(
+    localizedDir,
+    "resources",
+    new URL(cssUrl).hostname,
+    new URL(cssUrl).pathname.replace(
+      /^\/+/,
+      "",
+    ),
+  );
+}
+
+/*
+ * ============================================================
+ * REWRITE HTML
+ * ============================================================
+ */
+
 function rewriteHtml(
   html: string,
   pageUrl: string,
 ): string {
+  const currentPagePath =
+    pageMap.get(
+      normalizeUrl(pageUrl),
+    );
+
+  if (!currentPagePath) {
+    return html;
+  }
+
   return html.replace(
     /(src|href|poster)=("([^"]+)"|'([^']+)')/gi,
     (
@@ -314,7 +434,7 @@ function rewriteHtml(
         singleUrl;
 
       /*
-       * Preserve fragment-only links.
+       * Fragment-only anchors.
        */
       if (
         rawUrl.startsWith("#")
@@ -323,7 +443,7 @@ function rewriteHtml(
       }
 
       /*
-       * Preserve non-HTTP URLs.
+       * Non-HTTP URLs.
        */
       if (
         rawUrl.startsWith("data:") ||
@@ -347,15 +467,17 @@ function rewriteHtml(
       }
 
       /*
-       * External URLs remain untouched.
+       * External links stay untouched.
        */
       if (
-        absolute.origin !==
-        new URL(pageUrl).origin
+        absolute.origin !== origin
       ) {
         return match;
       }
 
+      /*
+       * Preserve #anchor.
+       */
       const hash =
         absolute.hash;
 
@@ -368,9 +490,10 @@ function rewriteHtml(
 
       /*
        * --------------------------------------------------------
-       * Internal page
+       * INTERNAL PAGE
        * --------------------------------------------------------
        */
+
       const pageDestination =
         pageMap.get(
           normalized,
@@ -378,10 +501,8 @@ function rewriteHtml(
 
       if (pageDestination) {
         let relative =
-          relativePath(
-            pageOutputPath(
-              pageUrl,
-            ),
+          relativeLocalPath(
+            currentPagePath,
             pageDestination,
           );
 
@@ -394,30 +515,33 @@ function rewriteHtml(
 
       /*
        * --------------------------------------------------------
-       * Resource
+       * LOCAL RESOURCE
        * --------------------------------------------------------
        */
+
       const resourceDestination =
         resourceMap.get(
           normalized,
         );
 
-      if (
-        resourceDestination
-      ) {
-        const relative =
-          relativePath(
-            pageOutputPath(
-              pageUrl,
-            ),
+      if (resourceDestination) {
+        let relative =
+          relativeLocalPath(
+            currentPagePath,
             resourceDestination,
           );
+
+        if (hash) {
+          relative += hash;
+        }
 
         return `${attribute}="${relative}"`;
       }
 
       /*
-       * Unknown internal URL:
+       * --------------------------------------------------------
+       * UNKNOWN INTERNAL URL
+       * --------------------------------------------------------
        *
        * Don't guess.
        */
@@ -426,122 +550,159 @@ function rewriteHtml(
   );
 }
 
-/**
- * Make sure a directory exists.
- */
-async function ensureParent(
-  filename: string,
-): Promise<void> {
-  await fs.mkdir(
-    path.dirname(filename),
-    {
-      recursive: true,
-    },
-  );
-}
-
-/**
- * ------------------------------------------------------------
- * COPY + REWRITE RESOURCES
- * ------------------------------------------------------------
+/*
+ * ============================================================
+ * COPY + LOCALIZE RESOURCES
+ * ============================================================
  */
 
-let copiedResources = 0;
-let rewrittenCss = 0;
+console.log("=== RESOURCES ===");
 
-for (const resource of resources) {
-  const normalized =
-    normalizeUrl(resource.url);
+let resourceCount = 0;
 
-  const destination =
-    resourceMap.get(
-      normalized,
-    );
+if (manifest.resources) {
+  for (
+    const [
+      resourceUrl,
+      resource,
+    ]
+    of Object.entries(
+      manifest.resources,
+    )
+  ) {
+    if (
+      resource.status !==
+      "downloaded"
+    ) {
+      continue;
+    }
 
-  if (!destination) {
-    continue;
-  }
-
-  const source =
-    rawResourcePath(
-      resource.url,
-    );
-
-  try {
-    const body =
-      await fs.readFile(
-        source,
+    const source =
+      rawPath(
+        resource.path,
       );
 
-    await ensureParent(
-      destination,
-    );
+    const destination =
+      localizedResourcePath(
+        resource,
+      );
 
-    const contentType =
-      resource.contentType ??
-      "";
+    try {
+      await fs.mkdir(
+        path.dirname(
+          destination,
+        ),
+        {
+          recursive: true,
+        },
+      );
 
-    if (
-      contentType
-        .toLowerCase()
-        .includes("text/css")
-    ) {
-      const css =
-        rewriteCss(
-          body.toString("utf8"),
-          resource.url,
+      /*
+       * Read the raw resource.
+       */
+      let body =
+        await fs.readFile(
+          source,
         );
 
-      await fs.writeFile(
-        destination,
-        css,
-        "utf8",
-      );
+      /*
+       * Rewrite CSS references.
+       */
+      if (
+        (
+          resource.contentType ??
+          ""
+        ).includes("text/css")
+      ) {
+        const css =
+          body.toString(
+            "utf8",
+          );
 
-      rewrittenCss++;
+        const rewritten =
+          rewriteCss(
+            css,
+            resourceUrl,
+          );
 
-      console.log(
-        `  CSS  ${destination}`,
-      );
-    } else {
+        body =
+          Buffer.from(
+            rewritten,
+            "utf8",
+          );
+      }
+
       await fs.writeFile(
         destination,
         body,
       );
 
+      resourceCount++;
+
       console.log(
-        `  COPY ${destination}`,
+        `  ${resourceUrl}`,
+      );
+    } catch (error) {
+      console.error(
+        `  FAILED ${resourceUrl}`,
+      );
+      console.error(
+        `    ${error}`,
       );
     }
-
-    copiedResources++;
-  } catch (error) {
-    console.error(
-      `  FAILED ${source}`,
-      error,
-    );
   }
 }
 
-/**
- * ------------------------------------------------------------
- * COPY + REWRITE PAGES
- * ------------------------------------------------------------
+console.log(
+  `Localized resources: ${resourceCount}`,
+);
+
+console.log();
+
+/*
+ * ============================================================
+ * COPY + LOCALIZE PAGES
+ * ============================================================
  */
 
-let localizedPages = 0;
+console.log("=== PAGES ===");
 
-for (const page of pages) {
+let pageCount = 0;
+
+for (
+  const [
+    pageUrl,
+    page,
+  ]
+  of Object.entries(
+    manifest.pages,
+  )
+) {
+  /*
+   * This is the important part:
+   *
+   * only process pages that actually
+   * exist in the raw crawl.
+   */
+  if (
+    page.status !==
+    "downloaded"
+  ) {
+    continue;
+  }
+
   const source =
-    rawPagePath(page);
+    rawPath(
+      page.path,
+    );
 
   const destination =
-    pageOutputPath(
-      page.url,
+    localizedPath(
+      page.path,
     );
 
   try {
-    const html =
+    const original =
       await fs.readFile(
         source,
         "utf8",
@@ -549,12 +710,17 @@ for (const page of pages) {
 
     const localized =
       rewriteHtml(
-        html,
-        page.url,
+        original,
+        pageUrl,
       );
 
-    await ensureParent(
-      destination,
+    await fs.mkdir(
+      path.dirname(
+        destination,
+      ),
+      {
+        recursive: true,
+      },
     );
 
     await fs.writeFile(
@@ -563,36 +729,52 @@ for (const page of pages) {
       "utf8",
     );
 
-    localizedPages++;
+    pageCount++;
 
     console.log(
-      `  PAGE ${destination}`,
+      `  ${pageUrl}`,
     );
   } catch (error) {
     console.error(
-      `  FAILED ${source}`,
-      error,
+      `  FAILED ${pageUrl}`,
+    );
+
+    console.error(
+      `    ${error}`,
     );
   }
 }
 
+/*
+ * ============================================================
+ * DONE
+ * ============================================================
+ */
+
 console.log();
+
 console.log(
   "================================",
 );
-console.log("DONE");
+
+console.log(
+  "LOCALIZATION COMPLETE",
+);
+
 console.log(
   "================================",
 );
+
 console.log(
-  `Pages:          ${localizedPages}`,
+  `Pages:     ${pageCount}`,
 );
+
 console.log(
-  `Resources:      ${copiedResources}`,
+  `Resources: ${resourceCount}`,
 );
+
 console.log(
-  `CSS rewritten:   ${rewrittenCss}`,
-);
-console.log(
-  `Output:          ${path.resolve(outputDir)}`,
+  `Output:    ${path.resolve(
+  localizedDir,
+)}`,
 );
