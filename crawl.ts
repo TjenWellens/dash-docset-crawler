@@ -386,5 +386,5 @@ console.log();
 console.log(`Crawled ${visited.size} URLs.`);
 
 if (visited.size >= maxPages) {
-  console.log(`Stopped at MAX_PAGES=${maxPages}`);
+  console.log(`Stopped at MAX_PAGES=${maxPages} (visited=${visited.size} left_over_in_queue=${queue.length})`);
 }
