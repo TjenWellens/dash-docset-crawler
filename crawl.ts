@@ -24,6 +24,11 @@ const scopePath = start.pathname.endsWith("/")
   ? start.pathname
   : start.pathname + "/";
 
+const stateFile = path.join(
+  outputDir,
+  ".crawl-state.json",
+);
+
 /**
  * Normalize a URL:
  * - remove hash
@@ -247,7 +252,10 @@ function addResourceUrl(
   }
 
   try {
-    const absolute = new URL(value, baseUrl);
+    const absolute = new URL(
+      value,
+      baseUrl,
+    );
 
     if (
       absolute.protocol !== "http:" &&
@@ -290,10 +298,16 @@ async function collectResourceUrls(
   const stylesheetCount =
     await stylesheets.count();
 
-  for (let i = 0; i < stylesheetCount; i++) {
+  for (
+    let i = 0;
+    i < stylesheetCount;
+    i++
+  ) {
     addResourceUrl(
       urls,
-      await stylesheets.nth(i).getAttribute("href"),
+      await stylesheets
+        .nth(i)
+        .getAttribute("href"),
       baseUrl,
     );
   }
@@ -303,15 +317,22 @@ async function collectResourceUrls(
    */
   const icons =
     page.locator(
-      'link[rel~="icon"][href], link[rel~="shortcut icon"][href]'
+      'link[rel~="icon"][href], link[rel~="shortcut icon"][href]',
     );
 
-  const iconCount = await icons.count();
+  const iconCount =
+    await icons.count();
 
-  for (let i = 0; i < iconCount; i++) {
+  for (
+    let i = 0;
+    i < iconCount;
+    i++
+  ) {
     addResourceUrl(
       urls,
-      await icons.nth(i).getAttribute("href"),
+      await icons
+        .nth(i)
+        .getAttribute("href"),
       baseUrl,
     );
   }
@@ -323,16 +344,22 @@ async function collectResourceUrls(
    */
   const preloads =
     page.locator(
-      'link[rel~="preload"][href], link[rel~="modulepreload"][href]'
+      'link[rel~="preload"][href], link[rel~="modulepreload"][href]',
     );
 
   const preloadCount =
     await preloads.count();
 
-  for (let i = 0; i < preloadCount; i++) {
+  for (
+    let i = 0;
+    i < preloadCount;
+    i++
+  ) {
     addResourceUrl(
       urls,
-      await preloads.nth(i).getAttribute("href"),
+      await preloads
+        .nth(i)
+        .getAttribute("href"),
       baseUrl,
     );
   }
@@ -346,20 +373,32 @@ async function collectResourceUrls(
   const imageCount =
     await images.count();
 
-  for (let i = 0; i < imageCount; i++) {
+  for (
+    let i = 0;
+    i < imageCount;
+    i++
+  ) {
     addResourceUrl(
       urls,
-      await images.nth(i).getAttribute("src"),
+      await images
+        .nth(i)
+        .getAttribute("src"),
       baseUrl,
     );
 
     const srcset =
-      await images.nth(i).getAttribute("srcset");
+      await images
+        .nth(i)
+        .getAttribute("srcset");
 
     if (srcset) {
-      for (const candidate of srcset.split(",")) {
+      for (
+        const candidate of srcset.split(",")
+        ) {
         const url =
-          candidate.trim().split(/\s+/)[0];
+          candidate
+            .trim()
+            .split(/\s+/)[0];
 
         addResourceUrl(
           urls,
@@ -379,8 +418,13 @@ async function collectResourceUrls(
   const sourceCount =
     await sources.count();
 
-  for (let i = 0; i < sourceCount; i++) {
-    const source = sources.nth(i);
+  for (
+    let i = 0;
+    i < sourceCount;
+    i++
+  ) {
+    const source =
+      sources.nth(i);
 
     addResourceUrl(
       urls,
@@ -392,9 +436,13 @@ async function collectResourceUrls(
       await source.getAttribute("srcset");
 
     if (srcset) {
-      for (const candidate of srcset.split(",")) {
+      for (
+        const candidate of srcset.split(",")
+        ) {
         const url =
-          candidate.trim().split(/\s+/)[0];
+          candidate
+            .trim()
+            .split(/\s+/)[0];
 
         addResourceUrl(
           urls,
@@ -414,10 +462,16 @@ async function collectResourceUrls(
   const scriptCount =
     await scripts.count();
 
-  for (let i = 0; i < scriptCount; i++) {
+  for (
+    let i = 0;
+    i < scriptCount;
+    i++
+  ) {
     addResourceUrl(
       urls,
-      await scripts.nth(i).getAttribute("src"),
+      await scripts
+        .nth(i)
+        .getAttribute("src"),
       baseUrl,
     );
   }
@@ -427,16 +481,22 @@ async function collectResourceUrls(
    */
   const media =
     page.locator(
-      "video[src], audio[src]"
+      "video[src], audio[src]",
     );
 
   const mediaCount =
     await media.count();
 
-  for (let i = 0; i < mediaCount; i++) {
+  for (
+    let i = 0;
+    i < mediaCount;
+    i++
+  ) {
     addResourceUrl(
       urls,
-      await media.nth(i).getAttribute("src"),
+      await media
+        .nth(i)
+        .getAttribute("src"),
       baseUrl,
     );
   }
@@ -450,10 +510,16 @@ async function collectResourceUrls(
   const posterCount =
     await posters.count();
 
-  for (let i = 0; i < posterCount; i++) {
+  for (
+    let i = 0;
+    i < posterCount;
+    i++
+  ) {
     addResourceUrl(
       urls,
-      await posters.nth(i).getAttribute("poster"),
+      await posters
+        .nth(i)
+        .getAttribute("poster"),
       baseUrl,
     );
   }
@@ -514,7 +580,10 @@ function rewriteHtml(
 
       try {
         absolute =
-          new URL(rawUrl, pageUrl);
+          new URL(
+            rawUrl,
+            pageUrl,
+          );
       } catch {
         return match;
       }
@@ -546,19 +615,22 @@ function rewriteHtml(
         );
 
       /*
-       * --------------------------------------------------------
        * IMPORTANT:
-       * Internal documentation pages are checked FIRST.
        *
-       * This prevents /docs/sustainability from ever being
-       * interpreted as an asset.
-       * --------------------------------------------------------
+       * Internal documentation pages are
+       * checked FIRST.
+       *
+       * This prevents /docs/sustainability
+       * from ever being interpreted as an
+       * asset.
        */
       if (
         inScope(normalized)
       ) {
         const destination =
-          pageOutputPath(normalized);
+          pageOutputPath(
+            normalized,
+          );
 
         let relative =
           path.relative(
@@ -581,12 +653,12 @@ function rewriteHtml(
       }
 
       /*
-       * --------------------------------------------------------
        * Resource.
-       * --------------------------------------------------------
        */
       const resourceDestination =
-        resourceMap.get(normalized);
+        resourceMap.get(
+          normalized,
+        );
 
       if (
         resourceDestination
@@ -602,7 +674,7 @@ function rewriteHtml(
 
       /*
        * Unknown internal URL:
-       * leave it untouched rather than guessing.
+       * leave untouched rather than guessing.
        */
       return match;
     },
@@ -650,9 +722,97 @@ async function downloadResource(
   }
 }
 
+/**
+ * ============================================================
+ * RESUME STATE
+ * ============================================================
+ */
+
+type CrawlState = {
+  queue: string[];
+  queued: string[];
+  visited: string[];
+  pages: Record<string, string>;
+  resources: Record<
+    string,
+    {
+      contentType: string;
+    }
+  >;
+};
+
+async function saveCrawlState(
+  queue: string[],
+  queued: Set<string>,
+  visited: Set<string>,
+  pages: Map<string, string>,
+  resources: Map<
+    string,
+    {
+      contentType: string;
+    }
+  >,
+): Promise<void> {
+  const state: CrawlState = {
+    queue,
+    queued: [...queued],
+    visited: [...visited],
+    pages: Object.fromEntries(
+      pages,
+    ),
+    resources: Object.fromEntries(
+      resources,
+    ),
+  };
+
+  const tmpFile =
+    `${stateFile}.tmp`;
+
+  await fs.writeFile(
+    tmpFile,
+    JSON.stringify(
+      state,
+      null,
+      2,
+    ),
+    "utf8",
+  );
+
+  /*
+   * Atomic-ish replacement:
+   *
+   * We write to .tmp first and only then
+   * replace the real state file.
+   */
+  await fs.rename(
+    tmpFile,
+    stateFile,
+  );
+}
+
+async function loadCrawlState(): Promise<
+  CrawlState | null
+> {
+  try {
+    const json =
+      await fs.readFile(
+        stateFile,
+        "utf8",
+      );
+
+    return JSON.parse(
+      json,
+    ) as CrawlState;
+  } catch {
+    return null;
+  }
+}
+
 await fs.mkdir(
   outputDir,
-  { recursive: true },
+  {
+    recursive: true,
+  },
 );
 
 const browser =
@@ -670,34 +830,102 @@ const page =
  * ============================================================
  */
 
-console.log("=== PHASE 1: CRAWL ===");
-
-const queue: string[] = [
-  normalizeUrl(start.href),
-];
-
-const queued =
-  new Set(queue);
-
-const visited =
-  new Set<string>();
+console.log(
+  "=== PHASE 1: CRAWL ===",
+);
 
 /*
  * page URL -> HTML
  */
-const pages =
-  new Map<string, string>();
+let pages:
+  Map<string, string>;
 
 /*
  * resource URL -> metadata
  */
-const resources =
-  new Map<
+let resources:
+  Map<
     string,
     {
       contentType: string;
     }
-  >();
+  >;
+
+let queue: string[];
+let queued: Set<string>;
+let visited: Set<string>;
+
+const existingState =
+  await loadCrawlState();
+
+if (existingState) {
+  console.log();
+  console.log(
+    `↻ Resuming crawl from ${stateFile}`,
+  );
+
+  queue =
+    existingState.queue;
+
+  queued =
+    new Set(
+      existingState.queued,
+    );
+
+  visited =
+    new Set(
+      existingState.visited,
+    );
+
+  pages =
+    new Map(
+      Object.entries(
+        existingState.pages,
+      ),
+    );
+
+  resources =
+    new Map(
+      Object.entries(
+        existingState.resources,
+      ),
+    );
+
+  console.log(
+    `  Pages already crawled: ${visited.size}`,
+  );
+
+  console.log(
+    `  Pages waiting in queue: ${queue.length}`,
+  );
+
+  console.log(
+    `  Resources discovered: ${resources.size}`,
+  );
+} else {
+  console.log();
+  console.log(
+    "Starting new crawl",
+  );
+
+  queue = [
+    normalizeUrl(
+      start.href,
+    ),
+  ];
+
+  queued =
+    new Set(queue);
+
+  visited =
+    new Set();
+
+  pages =
+    new Map();
+
+  resources =
+    new Map();
+}
 
 while (
   queue.length > 0 &&
@@ -707,7 +935,9 @@ while (
     queue.shift()!;
 
   if (
-    visited.has(requestedUrl)
+    visited.has(
+      requestedUrl,
+    )
   ) {
     continue;
   }
@@ -735,7 +965,9 @@ while (
     }
 
     const finalUrl =
-      normalizeUrl(page.url());
+      normalizeUrl(
+        page.url(),
+      );
 
     if (
       finalUrl !== requestedUrl
@@ -766,7 +998,9 @@ while (
     /*
      * Give lazy-loaded assets a chance.
      */
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(
+      1000,
+    );
 
     /*
      * Capture HTML.
@@ -791,7 +1025,9 @@ while (
      * Discover resources.
      */
     const pageResourceUrls =
-      await collectResourceUrls(page);
+      await collectResourceUrls(
+        page,
+      );
 
     let newResources = 0;
 
@@ -832,7 +1068,9 @@ while (
      * No page.evaluate().
      */
     const anchors =
-      page.locator("a[href]");
+      page.locator(
+        "a[href]",
+      );
 
     const anchorCount =
       await anchors.count();
@@ -847,7 +1085,9 @@ while (
       const href =
         await anchors
           .nth(i)
-          .getAttribute("href");
+          .getAttribute(
+            "href",
+          );
 
       if (!href) {
         continue;
@@ -875,7 +1115,9 @@ while (
          */
         if (
           url.pathname ===
-          new URL(finalUrl).pathname &&
+          new URL(
+            finalUrl,
+          ).pathname &&
           url.search === "" &&
           url.hash
         ) {
@@ -886,7 +1128,9 @@ while (
          * External links aren't crawled.
          */
         if (
-          !inScope(url.href)
+          !inScope(
+            url.href,
+          )
         ) {
           continue;
         }
@@ -897,8 +1141,12 @@ while (
           );
 
         if (
-          !visited.has(normalized) &&
-          !queued.has(normalized)
+          !visited.has(
+            normalized,
+          ) &&
+          !queued.has(
+            normalized,
+          )
         ) {
           queue.push(
             normalized,
@@ -918,9 +1166,33 @@ while (
     console.log(
       `  discovered ${discovered} new pages`,
     );
+
+    /*
+     * Persist state after EVERY successfully
+     * processed page.
+     */
+    await saveCrawlState(
+      queue,
+      queued,
+      visited,
+      pages,
+      resources,
+    );
   } catch (error) {
     console.error(
       `  ERROR: ${error}`,
+    );
+
+    /*
+     * Persist whatever we have so far even
+     * when a page fails.
+     */
+    await saveCrawlState(
+      queue,
+      queued,
+      visited,
+      pages,
+      resources,
     );
   }
 }
@@ -930,22 +1202,68 @@ console.log(
   `Phase 1 complete: ${pages.size} page URLs`,
 );
 
-if (visited.size >= maxPages && queue.length > 0) {
-  console.log(`⚠️  Crawl stopped because MAX_PAGES=${maxPages} was reached.`);
-  console.log(`    Pages crawled: ${visited.size}`);
-  console.log(`    Pages remaining in queue: ${queue.length}`);
-} else if (queue.length === 0) {
-  console.log("✓ Crawl completed: queue is empty.");
-  console.log(`  Pages crawled: ${visited.size}`);
+if (
+  visited.size >= maxPages &&
+  queue.length > 0
+) {
+  console.log(
+    `⚠️  Crawl stopped because MAX_PAGES=${maxPages} was reached.`,
+  );
+
+  console.log(
+    `    Pages crawled: ${visited.size}`,
+  );
+
+  console.log(
+    `    Pages remaining in queue: ${queue.length}`,
+  );
+} else if (
+  queue.length === 0
+) {
+  console.log(
+    "✓ Crawl completed: queue is empty.",
+  );
+
+  console.log(
+    `  Pages crawled: ${visited.size}`,
+  );
 } else {
-  console.log("Crawl stopped for another reason.");
-  console.log(`  Pages crawled: ${visited.size}`);
-  console.log(`  Pages remaining in queue: ${queue.length}`);
+  console.log(
+    "Crawl stopped for another reason.",
+  );
+
+  console.log(
+    `  Pages crawled: ${visited.size}`,
+  );
+
+  console.log(
+    `  Pages remaining in queue: ${queue.length}`,
+  );
 }
 
 console.log(
   `Resources discovered: ${resources.size}`,
 );
+
+/*
+ * If the queue is empty, the crawl is genuinely
+ * complete, so the resume state is no longer needed.
+ */
+if (
+  queue.length === 0
+) {
+  try {
+    await fs.unlink(
+      stateFile,
+    );
+
+    console.log(
+      `✓ Removed crawl state: ${stateFile}`,
+    );
+  } catch {
+    // State file may not exist.
+  }
+}
 
 /*
  * ============================================================
@@ -983,6 +1301,11 @@ for (
     continue;
   }
 
+  const normalized =
+    normalizeUrl(
+      resourceUrl,
+    );
+
   const destination =
     assetOutputPath(
       resourceUrl,
@@ -990,11 +1313,52 @@ for (
 
   try {
     await fs.mkdir(
-      path.dirname(destination),
+      path.dirname(
+        destination,
+      ),
       {
         recursive: true,
       },
     );
+
+    /*
+     * If the resource already exists,
+     * don't download it again.
+     *
+     * This is particularly useful when
+     * resuming a large crawl.
+     */
+    try {
+      await fs.access(
+        destination,
+      );
+
+      console.log(
+        `  already exists: ${resourceUrl}`,
+      );
+
+      const contentType =
+        resources.get(
+          resourceUrl,
+        )?.contentType ?? "";
+
+      resourceMap.set(
+        normalized,
+        destination,
+      );
+
+      resourceContentTypes.set(
+        normalized,
+        contentType,
+      );
+
+      continue;
+    } catch {
+      /*
+       * File doesn't exist.
+       * Download below.
+       */
+    }
 
     const result =
       await downloadResource(
@@ -1010,11 +1374,6 @@ for (
       destination,
       result.body,
     );
-
-    const normalized =
-      normalizeUrl(
-        resourceUrl,
-      );
 
     resourceMap.set(
       normalized,
@@ -1156,7 +1515,9 @@ console.log();
 console.log(
   "================================",
 );
-console.log("DONE");
+console.log(
+  "DONE",
+);
 console.log(
   "================================",
 );
