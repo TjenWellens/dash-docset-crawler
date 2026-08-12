@@ -59,3 +59,4 @@ open docs/drizzle/drizzle.docset
 # Known bugs
 - open online page uses wrong url
 - links to pages on the same domain, but not crawled, have broken links
+- ERROR: HTTP 404 causes stuck in loop
