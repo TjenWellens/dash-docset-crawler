@@ -1,6 +1,27 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import Database from "better-sqlite3";
+import initSqlJs from "sql.js";
+import { fileURLToPath } from "node:url";
+
+/*
+ * ============================================================
+ * PATH / MODULE HELPERS
+ * ============================================================
+ *
+ * sql.js needs to locate sql-wasm.wasm at runtime.
+ *
+ * This works when running:
+ *
+ *   npx tsx package.ts ...
+ *
+ * and keeps the implementation platform-independent.
+ */
+
+const __filename =
+  fileURLToPath(import.meta.url);
+
+const __dirname =
+  path.dirname(__filename);
 
 /*
  * ============================================================
@@ -14,6 +35,7 @@ if (!localDir) {
   console.error(
     "Usage: npx tsx package.ts <local-dir> <docset-dir>",
   );
+
   process.exit(1);
 }
 
@@ -114,6 +136,9 @@ const manifest =
  * ============================================================
  */
 
+/**
+ * Escape a value for XML.
+ */
 function escapeXml(
   value: string,
 ): string {
@@ -141,8 +166,8 @@ function escapeXml(
 }
 
 /**
- * Convert a filesystem path into
- * a path relative to Documents.
+ * Convert a filesystem path into a
+ * path relative to Documents.
  */
 function documentsPath(
   relativePath: string,
@@ -183,7 +208,8 @@ function extractTitle(
  *
  *   {
  *     name: "Select",
- *     id: "select"
+ *     id: "select",
+ *     level: 2
  *   }
  */
 function extractHeadings(
@@ -233,8 +259,8 @@ function extractHeadings(
 }
 
 /**
- * Remove HTML tags and decode the most
- * common HTML entities.
+ * Remove HTML tags and decode common
+ * HTML entities.
  */
 function cleanHtmlText(
   value: string,
@@ -276,7 +302,7 @@ function cleanHtmlText(
 }
 
 /**
- * Create a reasonable Dash type for a page.
+ * Determine the Dash search type for a page.
  */
 function pageType(
   url: string,
@@ -295,7 +321,8 @@ function pageType(
 }
 
 /**
- * Create a reasonable Dash type for a heading.
+ * Determine the Dash search type
+ * for a heading.
  */
 function headingType(
   level: number,
@@ -305,8 +332,6 @@ function headingType(
       return "Guide";
 
     case 2:
-      return "Section";
-
     case 3:
       return "Section";
 
@@ -316,10 +341,10 @@ function headingType(
 }
 
 /**
- * Convert the site's name into a useful
- * Dash display name.
+ * Convert the site's name into
+ * a display name.
  *
- * "drizzle" -> "Drizzle"
+ * drizzle -> Drizzle
  */
 function displayName(
   name: string,
@@ -424,7 +449,10 @@ const indexPath =
  * ============================================================
  */
 
-console.log("=== PACKAGE DOCSET ===");
+console.log(
+  "=== PACKAGE DOCSET ===",
+);
+
 console.log();
 
 console.log(
@@ -444,6 +472,28 @@ console.log(
 );
 
 console.log();
+
+/*
+ * ============================================================
+ * VALIDATE MANIFEST
+ * ============================================================
+ */
+
+if (!manifest.entry) {
+  console.error(
+    "ERROR: local/manifest.json has no entry field.",
+  );
+
+  process.exit(1);
+}
+
+if (!manifest.entry.path) {
+  console.error(
+    "ERROR: manifest.entry.path is empty.",
+  );
+
+  process.exit(1);
+}
 
 /*
  * ============================================================
@@ -474,8 +524,11 @@ try {
  * CLEAN OUTPUT
  * ============================================================
  *
- * Always create a fresh docset so stale
- * files cannot survive between builds.
+ * Always build a fresh docset.
+ *
+ * This prevents stale pages/resources/indexes
+ * from previous builds from remaining in the
+ * generated package.
  */
 
 await fs.rm(
@@ -498,15 +551,16 @@ await fs.mkdir(
  * COPY LOCALIZED WEBSITE
  * ============================================================
  *
- * Copy everything except manifest.json.
- *
- * This gives Dash:
+ * The resulting layout is:
  *
  * Contents/
  *   Resources/
  *     Documents/
  *       pages/
  *       resources/
+ *
+ * manifest.json itself is intentionally not
+ * copied into Documents.
  */
 
 console.log(
@@ -524,10 +578,6 @@ const localEntries =
 for (
   const entry of localEntries
 ) {
-  /*
-   * The manifest is packaging metadata,
-   * not part of the website.
-   */
   if (
     entry.name ===
     "manifest.json"
@@ -564,229 +614,309 @@ console.log();
 
 /*
  * ============================================================
- * CREATE SQLITE INDEX
+ * BUILD SEARCH INDEX DATA
  * ============================================================
  */
 
 console.log(
-  "=== CREATE INDEX ===",
+  "=== BUILD SEARCH INDEX ===",
 );
+
+const indexEntries: Array<{
+  name: string;
+  type: string;
+  path: string;
+}> = [];
 
 let pageIndexCount = 0;
 let headingIndexCount = 0;
 
+for (
+  const [
+    pageUrl,
+    page,
+  ] of Object.entries(
+    manifest.pages,
+  )
+) {
+  if (
+    page.status !==
+    "localized"
+  ) {
+    continue;
+  }
+
+  const pagePath =
+    documentsPath(
+      page.path,
+    );
+
+  const source =
+    path.join(
+      localDir,
+      page.path,
+    );
+
+  let html: string;
+
+  try {
+    html =
+      await fs.readFile(
+        source,
+        "utf8",
+      );
+  } catch (error) {
+    console.warn(
+      `  WARNING: Could not read ${page.path}`,
+    );
+
+    console.warn(
+      `    ${error}`,
+    );
+
+    continue;
+  }
+
+  /*
+   * ----------------------------------------------------------
+   * PAGE
+   * ----------------------------------------------------------
+   */
+
+  const title =
+    extractTitle(
+      html,
+    ) ??
+    pageUrl;
+
+  indexEntries.push({
+    name: title,
+    type: pageType(
+      pageUrl,
+    ),
+    path: pagePath,
+  });
+
+  pageIndexCount++;
+
+  /*
+   * ----------------------------------------------------------
+   * HEADINGS
+   * ----------------------------------------------------------
+   *
+   * Dash can navigate directly to:
+   *
+   *   page.html#heading-id
+   */
+
+  const headings =
+    extractHeadings(
+      html,
+    );
+
+  for (
+    const heading of headings
+  ) {
+    indexEntries.push({
+      name: heading.name,
+      type: headingType(
+        heading.level,
+      ),
+      path:
+        `${pagePath}#${heading.id}`,
+    });
+
+    headingIndexCount++;
+  }
+}
+
+console.log(
+  `  Pages:    ${pageIndexCount}`,
+);
+
+console.log(
+  `  Headings: ${headingIndexCount}`,
+);
+
+console.log(
+  `  Entries:  ${indexEntries.length}`,
+);
+
+console.log();
+
+/*
+ * ============================================================
+ * CREATE SQLITE DATABASE WITH SQL.JS
+ * ============================================================
+ *
+ * sql.js is SQLite compiled to WebAssembly.
+ *
+ * This means:
+ *
+ *   - no native Node addon
+ *   - no system sqlite3 dependency
+ *   - no platform-specific compilation
+ *   - works on macOS, Linux and Windows
+ *
+ * Dash only requires docSet.dsidx to be a valid
+ * SQLite database with the searchIndex table.
+ */
+
+console.log(
+  "=== CREATE SQLITE INDEX ===",
+);
+
 try {
+  const SQL =
+    await initSqlJs({
+      locateFile: (
+        file: string,
+      ) =>
+        path.join(
+          __dirname,
+          "node_modules",
+          "sql.js",
+          "dist",
+          file,
+        ),
+    });
+
   console.log(
-    `  Database: ${indexPath}`,
+    "  sql.js initialized",
   );
 
+  /*
+   * Create an in-memory SQLite database.
+   */
   const db =
-    new Database(
-      indexPath,
-    );
+    new SQL.Database();
 
   console.log(
-    "  SQLite database opened",
+    "  SQLite database created",
   );
 
-  db.exec(`
-    CREATE TABLE searchIndex (
-      id INTEGER PRIMARY KEY,
-      name TEXT,
-      type TEXT,
-      path TEXT
-    );
-  `);
+  /*
+   * Create the schema expected by Dash.
+   */
+  db.run(`
+CREATE TABLE searchIndex (
+  id INTEGER PRIMARY KEY,
+  name TEXT,
+  type TEXT,
+  path TEXT
+);
+
+CREATE UNIQUE INDEX anchor
+ON searchIndex (
+  name,
+  type,
+  path
+);
+`);
 
   console.log(
     "  searchIndex table created",
   );
 
-  db.exec(`
-    CREATE UNIQUE INDEX anchor
-      ON searchIndex (name, type, path);
-  `);
-
-  console.log(
-    "  searchIndex index created",
-  );
-
+  /*
+   * Prepare one INSERT statement and
+   * reuse it for every entry.
+   */
   const insert =
     db.prepare(`
-      INSERT OR IGNORE INTO searchIndex
-        (name, type, path)
-      VALUES
-        (?, ?, ?)
-    `);
-
-  const insertMany =
-    db.transaction(
-      (
-        entries: Array<{
-          name: string;
-          type: string;
-          path: string;
-        }>,
-      ) => {
-        for (
-          const entry of entries
-          ) {
-          insert.run(
-            entry.name,
-            entry.type,
-            entry.path,
-          );
-        }
-      },
-    );
-
-  const indexEntries: Array<{
-    name: string;
-    type: string;
-    path: string;
-  }> = [];
+INSERT OR IGNORE INTO searchIndex
+(
+  name,
+  type,
+  path
+)
+VALUES
+(
+  $name,
+  $type,
+  $path
+);
+`);
 
   /*
-   * ----------------------------------------------------------
-   * INDEX PAGES
-   * ----------------------------------------------------------
+   * Insert all pages/headings.
    */
-
   for (
-    const [
-      pageUrl,
-      page,
-    ] of Object.entries(
-    manifest.pages,
-  )
-    ) {
-    if (
-      page.status !==
-      "localized"
-    ) {
-      continue;
-    }
+    const entry of indexEntries
+  ) {
+    insert.run({
+      $name:
+        entry.name,
 
-    const pagePath =
-      documentsPath(
-        page.path,
-      );
+      $type:
+        entry.type,
 
-    const source =
-      path.join(
-        localDir,
-        page.path,
-      );
-
-    let html: string;
-
-    try {
-      html =
-        await fs.readFile(
-          source,
-          "utf8",
-        );
-    } catch (error) {
-      console.warn(
-        `  WARNING: Could not read ${page.path}`,
-      );
-
-      console.warn(
-        `    ${error}`,
-      );
-
-      continue;
-    }
-
-    /*
-     * Page title.
-     */
-    const title =
-      extractTitle(
-        html,
-      ) ??
-      pageUrl;
-
-    indexEntries.push({
-      name: title,
-      type: pageType(
-        pageUrl,
-      ),
-      path: pagePath,
+      $path:
+        entry.path,
     });
-
-    pageIndexCount++;
-
-    /*
-     * Headings.
-     */
-    const headings =
-      extractHeadings(
-        html,
-      );
-
-    for (
-      const heading of headings
-      ) {
-      indexEntries.push({
-        name: heading.name,
-        type: headingType(
-          heading.level,
-        ),
-        path:
-          `${pagePath}#${heading.id}`,
-      });
-
-      headingIndexCount++;
-    }
   }
 
-  console.log(
-    `  Pages found:       ${pageIndexCount}`,
-  );
+  insert.free();
 
   console.log(
-    `  Headings found:    ${headingIndexCount}`,
+    `  ${indexEntries.length} entries inserted`,
   );
+
+  /*
+   * Verify the number of rows before
+   * exporting the database.
+   */
+  const result =
+    db.exec(
+      `
+SELECT COUNT(*)
+FROM searchIndex;
+`,
+    );
+
+  const rowCount =
+    result[0]
+      ?.values[0]
+      ?.[0];
 
   console.log(
-    `  Entries to insert: ${indexEntries.length}`,
+    `  SQLite rows: ${rowCount}`,
   );
 
-  insertMany(
-    indexEntries,
-  );
+  /*
+   * Export the SQLite database to a
+   * Uint8Array.
+   */
+  const database =
+    db.export();
 
-  console.log(
-    "  Entries inserted",
-  );
-
-  const row =
-    db
-      .prepare(
-        "SELECT COUNT(*) AS count FROM searchIndex",
-      )
-      .get() as {
-      count: number;
-    };
-
-  console.log(
-    `  SQLite rows:       ${row.count}`,
+  /*
+   * Write the actual Dash database.
+   */
+  await fs.writeFile(
+    indexPath,
+    Buffer.from(
+      database,
+    ),
   );
 
   db.close();
 
   console.log(
-    "  SQLite database closed",
+    `  Written: ${indexPath}`,
   );
 } catch (error) {
   console.error();
+
   console.error(
-    "ERROR: Failed to create Dash SQLite index.",
+    "ERROR: Failed to create SQLite index.",
   );
+
   console.error();
 
-  console.error(error);
+  console.error(
+    error,
+  );
 
   process.exit(1);
 }
@@ -798,20 +928,30 @@ console.log();
  * CREATE INFO.PLIST
  * ============================================================
  *
- * This is the metadata Dash uses to identify
- * the bundle as a docset.
+ * This tells Dash that the bundle is a
+ * Dash docset and provides its metadata.
  */
 
 console.log(
   "=== CREATE INFO.PLIST ===",
 );
 
+const platformFamily =
+  manifest.site.name
+    .toLowerCase()
+    .replace(
+      /[^a-z0-9]+/g,
+      "-",
+    );
+
 const infoPlist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
   <dict>
     <key>CFBundleDisplayName</key>
-  <string>${escapeXml(siteName)}</string>
+  <string>${escapeXml(
+  siteName,
+)}</string>
 
 <key>CFBundleIdentifier</key>
 <string>${escapeXml(
@@ -821,16 +961,13 @@ const infoPlist = `<?xml version="1.0" encoding="UTF-8"?>
 )}</string>
 
 <key>CFBundleName</key>
-<string>${escapeXml(siteName)}</string>
+<string>${escapeXml(
+  siteName,
+)}</string>
 
 <key>DocSetPlatformFamily</key>
 <string>${escapeXml(
-  manifest.site.name
-    .toLowerCase()
-    .replace(
-      /[^a-z0-9]+/g,
-      "-",
-    ),
+  platformFamily,
 )}</string>
 
 <key>isDashDocset</key>
@@ -838,9 +975,6 @@ const infoPlist = `<?xml version="1.0" encoding="UTF-8"?>
 
 <key>isJavaScriptEnabled</key>
 <true/>
-
-<key>DashDocSetFamily</key>
-<string>dashtoc</string>
 
 <key>DashDocSetKeyword</key>
 <string>${escapeXml(
@@ -862,28 +996,34 @@ await fs.writeFile(
 );
 
 console.log(
-  `  ${infoPlistPath}`,
+  `  Written: ${infoPlistPath}`,
 );
 
 console.log();
 
 /*
  * ============================================================
- * WRITE PACKAGE METADATA
+ * PACKAGE METADATA
  * ============================================================
  *
- * This is not required by Dash, but is useful
- * for inspecting the generated package later.
+ * This file isn't required by Dash.
+ *
+ * It is useful for debugging and lets us
+ * trace which localized manifest produced
+ * the docset.
  */
 
 const packageMetadata = {
   version: 1,
 
-  site: manifest.site,
+  site:
+    manifest.site,
 
-  entry: manifest.entry,
+  entry:
+    manifest.entry,
 
-  source: manifest.source,
+  source:
+    manifest.source,
 
   localizedAt:
     manifest.localizedAt,
@@ -900,6 +1040,9 @@ const packageMetadata = {
 
     resources:
       manifest.stats.resources,
+
+    indexEntries:
+      indexEntries.length,
   },
 };
 
@@ -916,11 +1059,109 @@ await fs.writeFile(
   "utf8",
 );
 
+console.log(
+  "=== VERIFY DOCSET ===",
+);
+
+/*
+ * ============================================================
+ * VERIFY GENERATED FILES
+ * ============================================================
+ */
+
+const requiredFiles = [
+  infoPlistPath,
+  indexPath,
+  path.join(
+    documentsDir,
+    manifest.entry.path,
+  ),
+];
+
+for (
+  const file of requiredFiles
+) {
+  try {
+    const stat =
+      await fs.stat(
+        file,
+      );
+
+    if (
+      !stat.isFile()
+    ) {
+      throw new Error(
+        "Not a regular file",
+      );
+    }
+
+    console.log(
+      `  OK ${file}`,
+    );
+  } catch (error) {
+    console.error(
+      `  MISSING ${file}`,
+    );
+
+    console.error(
+      `    ${error}`,
+    );
+
+    process.exit(1);
+  }
+}
+
+/*
+ * ============================================================
+ * VERIFY SQLITE HEADER
+ * ============================================================
+ *
+ * SQLite databases start with:
+ *
+ *   SQLite format 3\0
+ *
+ * Check that the exported database is
+ * actually a SQLite file before declaring
+ * the docset complete.
+ */
+
+const indexBuffer =
+  await fs.readFile(
+    indexPath,
+  );
+
+const sqliteHeader =
+  indexBuffer
+    .subarray(
+      0,
+      16,
+    )
+    .toString(
+      "ascii",
+    );
+
+if (
+  sqliteHeader !==
+  "SQLite format 3\u0000"
+) {
+  console.error(
+    "ERROR: docSet.dsidx is not a valid SQLite database.",
+  );
+
+  process.exit(1);
+}
+
+console.log(
+  `  OK SQLite database (${indexBuffer.length} bytes)`,
+);
+
 /*
  * ============================================================
  * DONE
  * ============================================================
  */
+
+console.log();
 
 console.log(
   "================================",
@@ -948,6 +1189,10 @@ console.log(
 
 console.log(
   `Resources:  ${manifest.stats.resources}`,
+);
+
+console.log(
+  `Entries:    ${indexEntries.length}`,
 );
 
 console.log(

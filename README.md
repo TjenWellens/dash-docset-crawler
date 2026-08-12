@@ -21,7 +21,7 @@ open docs/drizzle/local/pages/orm.drizzle.team/docs/overview.html
 ```shell
 npx tsx package.ts \
   docs/drizzle/local \
-  docs/drizzle/docset
+  docs/drizzle/drizzle.docset
 ```
 
 (optional) inspect searchIndex

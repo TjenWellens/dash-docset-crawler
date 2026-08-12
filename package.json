@@ -11,12 +11,12 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "better-sqlite3": "^13.0.3",
-    "playwright": "^1.62.1"
+    "playwright": "^1.62.1",
+    "sql.js": "^1.14.1"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^26.2.0",
+    "@types/sql.js": "^1.4.11",
     "tsx": "^4.23.12"
   }
 }
