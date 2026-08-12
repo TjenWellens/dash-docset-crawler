@@ -638,7 +638,7 @@ if (manifest.icon) {
 
   const iconDestination =
     path.join(
-      resourcesDir,
+      docsetDir,
       "icon.png",
     );
 
