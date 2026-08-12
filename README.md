@@ -12,7 +12,7 @@ npx tsx localize.ts \
   docs/drizzle/local
 ```
 
-inspect
+(optional) inspect
 ```shell
 open docs/drizzle/local/pages/orm.drizzle.team/docs/overview.html
 ```
