@@ -3,6 +3,7 @@ import path from "node:path";
 import initSqlJs from "sql.js";
 import {fileURLToPath} from "node:url";
 import sharp from "sharp";
+import { decodeIco } from "icojs";
 
 /*
  * ============================================================
@@ -527,66 +528,6 @@ try {
 
 /*
  * ============================================================
- * CREATE DOCSET ICON
- * ============================================================
- */
-
-console.log(
-  "=== CREATE ICON ===",
-);
-
-if (manifest.icon) {
-  const iconSource =
-    path.join(
-      localDir,
-      manifest.icon.path,
-    );
-
-  const iconDestination =
-    path.join(
-      resourcesDir,
-      "icon.png",
-    );
-
-  try {
-    await fs.access(
-      iconSource,
-    );
-
-    await sharp(
-      iconSource,
-    )
-      .png()
-      .toFile(
-        iconDestination,
-      );
-
-    console.log(
-      `  ${manifest.icon.url}`,
-    );
-
-    console.log(
-      `  → ${iconDestination}`,
-    );
-  } catch (error) {
-    console.warn(
-      "  WARNING: Could not create icon.png",
-    );
-
-    console.warn(
-      `    ${error}`,
-    );
-  }
-} else {
-  console.log(
-    "  No icon configured",
-  );
-}
-
-console.log();
-
-/*
- * ============================================================
  * CLEAN OUTPUT
  * ============================================================
  *
@@ -673,6 +614,120 @@ for (
 
   console.log(
     `  ${entry.name}`,
+  );
+}
+
+console.log();
+
+/*
+ * ============================================================
+ * CREATE DOCSET ICON
+ * ============================================================
+ */
+
+console.log(
+  "=== CREATE ICON ===",
+);
+
+if (manifest.icon) {
+  const iconSource =
+    path.join(
+      localDir,
+      manifest.icon.path,
+    );
+
+  const iconDestination =
+    path.join(
+      resourcesDir,
+      "icon.png",
+    );
+
+  try {
+    await fs.access(
+      iconSource,
+    );
+
+    const input =
+      await fs.readFile(
+        iconSource,
+      );
+
+    let pngBuffer: Buffer;
+
+    try {
+      /*
+       * First try Sharp.
+       *
+       * This handles PNG, JPEG, WebP,
+       * SVG (depending on the build), etc.
+       */
+      pngBuffer =
+        await sharp(input)
+          .png()
+          .toBuffer();
+    } catch {
+      /*
+       * Sharp couldn't decode the file.
+       *
+       * This is commonly the case with
+       * some ICO files.
+       */
+      const images =
+        await decodeIco(
+          input,
+          "image/png",
+        );
+
+      if (
+        images.length === 0
+      ) {
+        throw new Error(
+          "ICO file contains no images",
+        );
+      }
+
+      /*
+       * Select the largest icon.
+       */
+      const image =
+        images.reduce(
+          (largest, current) =>
+            current.width >
+            largest.width
+              ? current
+              : largest,
+        );
+
+      pngBuffer =
+        Buffer.from(
+          image.buffer,
+        );
+    }
+
+    await fs.writeFile(
+      iconDestination,
+      pngBuffer,
+    );
+
+    console.log(
+      `  ${manifest.icon.url}`,
+    );
+
+    console.log(
+      `  → ${iconDestination}`,
+    );
+  } catch (error) {
+    console.warn(
+      "  WARNING: Could not create icon.png",
+    );
+
+    console.warn(
+      `    ${error}`,
+    );
+  }
+} else {
+  console.log(
+    "  No icon configured",
   );
 }
 
