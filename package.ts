@@ -985,6 +985,11 @@ const infoPlist = `<?xml version="1.0" encoding="UTF-8"?>
 <string>${escapeXml(
   manifest.entry.path,
 )}</string>
+
+<key>dashIndexFilePath</key>
+<string>${escapeXml(
+  manifest.entry.path,
+)}</string>
 </dict>
 </plist>
   `;
