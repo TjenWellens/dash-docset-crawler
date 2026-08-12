@@ -636,6 +636,14 @@ if (manifest.icon) {
       manifest.icon.path,
     );
 
+  /*
+   * Dash expects icon.png at the
+   * ROOT of the .docset bundle.
+   *
+   * NOT:
+   *
+   * Contents/Resources/icon.png
+   */
   const iconDestination =
     path.join(
       docsetDir,
@@ -656,21 +664,24 @@ if (manifest.icon) {
 
     try {
       /*
-       * First try Sharp.
-       *
-       * This handles PNG, JPEG, WebP,
-       * SVG (depending on the build), etc.
+       * Try Sharp first.
        */
       pngBuffer =
         await sharp(input)
+          .resize(
+            32,
+            32,
+            {
+              fit: "contain",
+            },
+          )
           .png()
           .toBuffer();
     } catch {
       /*
-       * Sharp couldn't decode the file.
+       * Sharp couldn't decode the favicon.
        *
-       * This is commonly the case with
-       * some ICO files.
+       * This commonly happens with ICO files.
        */
       const images =
         await decodeIco(
@@ -687,7 +698,7 @@ if (manifest.icon) {
       }
 
       /*
-       * Select the largest icon.
+       * Pick the largest icon available.
        */
       const image =
         images.reduce(
@@ -699,9 +710,31 @@ if (manifest.icon) {
         );
 
       pngBuffer =
-        Buffer.from(
-          image.buffer,
-        );
+        await sharp(
+          Buffer.from(
+            image.buffer,
+          ),
+          {
+            raw: {
+              width:
+              image.width,
+
+              height:
+              image.height,
+
+              channels: 4,
+            },
+          },
+        )
+          .resize(
+            32,
+            32,
+            {
+              fit: "contain",
+            },
+          )
+          .png()
+          .toBuffer();
     }
 
     await fs.writeFile(
@@ -710,11 +743,11 @@ if (manifest.icon) {
     );
 
     console.log(
-      `  ${manifest.icon.url}`,
+      `  Source: ${manifest.icon.url}`,
     );
 
     console.log(
-      `  → ${iconDestination}`,
+      `  Created: ${iconDestination}`,
     );
   } catch (error) {
     console.warn(
