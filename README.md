@@ -1,4 +1,5 @@
 # Dash Docset Crawler
+
 Creates a docset from a webpage by crawling all child pages.
 
 ## (1) crawl raw pages
@@ -16,6 +17,7 @@ MAX_PAGES=5 npx tsx crawl.ts \
 ## (2) localize for offline use
 
 run localizer
+
 - make pages and assets refer to local files
 - use relative paths (`/assets/foo.css` -> `../../assets/foo.css`)
 
@@ -57,6 +59,10 @@ open docs/drizzle/drizzle.docset
 ```
 
 # Known bugs
+
 - open online page uses wrong url
 - links to pages on the same domain, but not crawled, have broken links
 - ERROR: HTTP 404 causes stuck in loop
+    - workaround A) remove entry from: manifest.json - pages
+    - workaround B) in you want to redirect to different page, copy that page's {"path" "status" "scrapedAt"} over the
+      errorred
