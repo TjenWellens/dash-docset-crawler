@@ -45,6 +45,10 @@ type Manifest = {
     startUrl: string;
   };
 
+  icon?: {
+    url: string;
+  };
+
   scope: {
     origin: string;
     path: string;
@@ -84,6 +88,11 @@ type LocalManifest = {
   site: {
     name: string;
     startUrl: string;
+  };
+
+  icon?: {
+    url: string;
+    path: string;
   };
 
   scope: {
@@ -335,6 +344,35 @@ for (
 const resourceMap =
   new Map<string, string>();
 
+let localizedIcon:
+  | {
+  url: string;
+  path: string;
+}
+  | undefined;
+
+if (manifest.icon) {
+  const iconResource =
+    manifest.resources?.[
+      manifest.icon.url
+      ];
+
+  if (
+    iconResource &&
+    iconResource.status ===
+    "downloaded"
+  ) {
+    localizedIcon = {
+      url: manifest.icon.url,
+      path: iconResource.path,
+    };
+  } else {
+    console.warn(
+      `Warning: icon ${manifest.icon.url} was not downloaded.`,
+    );
+  }
+}
+
 /**
  * Normalized resource URL
  * ->
@@ -469,6 +507,12 @@ const localManifest: LocalManifest = {
     name: manifest.site.name,
     startUrl: manifest.site.startUrl,
   },
+
+  ...(localizedIcon
+    ? {
+      icon: localizedIcon,
+    }
+    : {}),
 
   scope: {
     origin: manifest.scope.origin,

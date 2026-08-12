@@ -1,7 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import initSqlJs from "sql.js";
-import { fileURLToPath } from "node:url";
+import {fileURLToPath} from "node:url";
+import sharp from "sharp";
 
 /*
  * ============================================================
@@ -77,6 +78,11 @@ type LocalManifest = {
   site: {
     name: string;
     startUrl: string;
+  };
+
+  icon?: {
+    url: string;
+    path: string;
   };
 
   scope: {
@@ -518,6 +524,66 @@ try {
 
   process.exit(1);
 }
+
+/*
+ * ============================================================
+ * CREATE DOCSET ICON
+ * ============================================================
+ */
+
+console.log(
+  "=== CREATE ICON ===",
+);
+
+if (manifest.icon) {
+  const iconSource =
+    path.join(
+      localDir,
+      manifest.icon.path,
+    );
+
+  const iconDestination =
+    path.join(
+      resourcesDir,
+      "icon.png",
+    );
+
+  try {
+    await fs.access(
+      iconSource,
+    );
+
+    await sharp(
+      iconSource,
+    )
+      .png()
+      .toFile(
+        iconDestination,
+      );
+
+    console.log(
+      `  ${manifest.icon.url}`,
+    );
+
+    console.log(
+      `  → ${iconDestination}`,
+    );
+  } catch (error) {
+    console.warn(
+      "  WARNING: Could not create icon.png",
+    );
+
+    console.warn(
+      `    ${error}`,
+    );
+  }
+} else {
+  console.log(
+    "  No icon configured",
+  );
+}
+
+console.log();
 
 /*
  * ============================================================

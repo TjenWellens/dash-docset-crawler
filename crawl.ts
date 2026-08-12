@@ -70,6 +70,10 @@ interface Manifest {
     startUrl: string;
   };
 
+  icon?: {
+    url: string;
+  };
+
   scope: {
     origin: string;
     path: string;
@@ -433,6 +437,85 @@ function addResourceUrl(
     );
   } catch {
     // Ignore malformed URLs.
+  }
+}
+
+/**
+ * Find the site's favicon from the current page.
+ *
+ * We prefer:
+ *
+ *   <link rel="icon" href="...">
+ *   <link rel="shortcut icon" href="...">
+ *
+ * The first valid icon found wins.
+ */
+async function findFaviconUrl(
+  page: Page,
+): Promise<string | null> {
+  const baseUrl = page.url();
+
+  const icons = page.locator(
+    'link[rel~="icon"][href], link[rel~="shortcut"][href]',
+  );
+
+  const count =
+    await icons.count();
+
+  for (
+    let i = 0;
+    i < count;
+    i++
+  ) {
+    const href =
+      await icons
+        .nth(i)
+        .getAttribute("href");
+
+    if (!href) {
+      continue;
+    }
+
+    try {
+      const url =
+        new URL(
+          href,
+          baseUrl,
+        );
+
+      if (
+        url.protocol !== "http:" &&
+        url.protocol !== "https:"
+      ) {
+        continue;
+      }
+
+      url.hash = "";
+      url.search = "";
+
+      return url.href;
+    } catch {
+      // Ignore malformed icon URLs.
+    }
+  }
+
+  /*
+   * Fallback to the conventional
+   * /favicon.ico location.
+   */
+  try {
+    const url =
+      new URL(baseUrl);
+
+    url.pathname =
+      "/favicon.ico";
+
+    url.search = "";
+    url.hash = "";
+
+    return url.href;
+  } catch {
+    return null;
   }
 }
 
@@ -1091,6 +1174,28 @@ while (
 
         scrapedAt,
       };
+    }
+
+    /*
+     * Discover favicon.
+     *
+     * Only set it once. The first page that
+     * exposes a valid favicon becomes the
+     * site's favicon.
+     */
+    if (!manifest.icon) {
+      const faviconUrl =
+        await findFaviconUrl(page);
+
+      if (faviconUrl) {
+        manifest.icon = {
+          url: faviconUrl,
+        };
+
+        console.log(
+          `  favicon: ${faviconUrl}`,
+        );
+      }
     }
 
     /*

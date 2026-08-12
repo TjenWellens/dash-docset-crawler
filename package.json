@@ -1,6 +1,6 @@
 {
   "name": "doc-crawler",
-  "version": "19.0.0",
+  "version": "20.0.0",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -12,6 +12,7 @@
   "description": "",
   "dependencies": {
     "playwright": "^1.62.1",
+    "sharp": "^0.35.3",
     "sql.js": "^1.14.1"
   },
   "devDependencies": {
