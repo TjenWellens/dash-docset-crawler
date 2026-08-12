@@ -714,17 +714,6 @@ if (manifest.icon) {
           Buffer.from(
             image.buffer,
           ),
-          {
-            raw: {
-              width:
-              image.width,
-
-              height:
-              image.height,
-
-              channels: 4,
-            },
-          },
         )
           .resize(
             32,
