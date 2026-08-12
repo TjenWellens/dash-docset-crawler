@@ -1126,7 +1126,7 @@ const infoPlist = `<?xml version="1.0" encoding="UTF-8"?>
 
 <key>DashDocSetFallbackURL</key>
 <string>${escapeXml(
-  manifest.entry.path,
+  manifest.entry.url,
 )}</string>
 
 <key>dashIndexFilePath</key>
