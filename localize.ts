@@ -827,12 +827,35 @@ function rewriteHtml(
 
       /*
        * --------------------------------------------------------
-       * UNKNOWN INTERNAL URL
+       * UNKNOWN SAME-ORIGIN URL
        * --------------------------------------------------------
        *
-       * Don't guess.
+       * This is a real online page on the same
+       * site, but outside the crawl scope.
+       *
+       * Example:
+       *
+       *   /packages
+       *
+       * becomes:
+       *
+       *   https://svelte.dev/packages
+       *
+       * rather than remaining:
+       *
+       *   /packages
+       *
+       * which Dash would resolve against its
+       * local HTTP server.
        */
-      return match;
+      let onlineUrl =
+        absolute.href;
+
+      if (hash) {
+        onlineUrl += hash;
+      }
+
+      return `${attribute}="${onlineUrl}"`;
     },
   );
 }
